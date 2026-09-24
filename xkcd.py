@@ -996,6 +996,19 @@ def cmd_pack(args):
     return 0
 
 
+def find_leaked_transcripts(db):
+    """Comic numbers whose stored explainxkcd text contains Talk-page markup.
+
+    Twelve probes cannot prove the extractor across 1636 pages, so this runs as
+    a check over the whole corpus after every fetch.
+    """
+    return [
+        row["num"]
+        for row in db.execute("SELECT num, explain_transcript FROM comics")
+        if has_leaked_markup(row["explain_transcript"])
+    ]
+
+
 def run_selftest(db):
     """Assert known-good facts against a database. Returns 0 or 1."""
     checks = []
@@ -1021,14 +1034,19 @@ def run_selftest(db):
     check("#404 absent",
           db.execute("SELECT COUNT(*) c FROM comics WHERE num = 404").fetchone()["c"], 0)
 
-    with_transcript = db.execute(
-        "SELECT COUNT(*) c FROM comics WHERE has_transcript = 1").fetchone()["c"]
-    check("comics with a transcript", with_transcript, 1665)
-    check("comics without a transcript", total - with_transcript, 1636)
+    # These pin the official corpus, the part xkcd itself published. The
+    # has_transcript field now also counts explainxkcd rows, so a pin on it
+    # would be a moving target and would stop describing the original fact.
+    official = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE transcript_source = 'official'"
+    ).fetchone()["c"]
+    check("comics with an official transcript", official, 1665)
     check("total comics", total, 3301)
 
-    check("all transcripts are #1..#1677",
-          db.execute("SELECT MAX(num) m FROM comics WHERE has_transcript = 1").fetchone()["m"],
+    check("all official transcripts are #1..#1677",
+          db.execute(
+              "SELECT MAX(num) m FROM comics WHERE transcript_source = 'official'"
+          ).fetchone()["m"],
           1677)
 
     nulls = db.execute(
@@ -1054,6 +1072,19 @@ def run_selftest(db):
     ).fetchone()["c"]
     check("no zero-byte images recorded", bad_images, 0)
 
+    check("no Talk-page markup leaked into any transcript",
+          find_leaked_transcripts(db), [])
+
+    unsourced = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE COALESCE(transcript_source, 'none') = 'none'"
+    ).fetchone()["c"]
+    check("every comic has a transcript source", unsourced, 0)
+
+    missing_blocks = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE has_transcript = 1 AND scene_blocks IS NULL"
+    ).fetchone()["c"]
+    check("every sourced transcript has scene-block data", missing_blocks, 0)
+
     failed = 0
     for label, ok, got, want in checks:
         print(f"  {'ok  ' if ok else 'FAIL'} {label}")
@@ -1062,7 +1093,11 @@ def run_selftest(db):
             print(f"       got  {got!r}")
             print(f"       want {want!r}")
 
-    print(f"\n{len(checks) - failed}/{len(checks)} checks passed")
+    incomplete = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE explain_incomplete = 1"
+    ).fetchone()["c"]
+    print(f"\nflagged incomplete by explainxkcd: {incomplete}")
+    print(f"{len(checks) - failed}/{len(checks)} checks passed")
     return 1 if failed else 0
 
 

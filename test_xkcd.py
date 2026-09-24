@@ -907,6 +907,24 @@ def test_format_pack_separates_the_two_speaker_lists():
     assert "Speakers in explainxkcd transcripts" in text
 
 
+def test_find_leaked_transcripts_flags_only_the_leaking_row():
+    """Review Focus 2, asserted precisely rather than through an exit code.
+
+    run_selftest returns 1 for several unrelated reasons on a three-comic
+    fixture, including the pinned 1665 transcript count, so asserting on its
+    exit code would pass whether or not this check exists.
+    """
+    db = seeded_db()
+    db.execute("UPDATE comics SET explain_transcript = 'Add comment',"
+               " explain_fetched_at = 'now' WHERE num = 2")
+    db.commit()
+    assert xkcd.find_leaked_transcripts(db) == [2]
+
+
+def test_find_leaked_transcripts_is_empty_on_clean_data():
+    assert xkcd.find_leaked_transcripts(seeded_db()) == []
+
+
 def _run():
     tests = [
         (n, f)
