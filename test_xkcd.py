@@ -543,6 +543,11 @@ def test_format_pack_reports_the_speaker_roster():
     assert "Boy" in text
 
 
+def test_run_selftest_fails_cleanly_on_an_empty_corpus():
+    """It must report, not traceback, when the corpus has not been built yet."""
+    assert xkcd.run_selftest(tmpdb()) == 1
+
+
 def _run():
     tests = [
         (n, f)

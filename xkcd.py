@@ -691,6 +691,80 @@ def cmd_pack(args):
     return 0
 
 
+def run_selftest(db):
+    """Assert known-good facts against a database. Returns 0 or 1."""
+    checks = []
+
+    def check(label, got, want):
+        checks.append((label, got == want, got, want))
+
+    total = db.execute("SELECT COUNT(*) c FROM comics").fetchone()["c"]
+    if total < 100:
+        print(f"corpus has only {total} comics; run `xkcd.py fetch` first")
+        return 1
+
+    row = db.execute("SELECT * FROM comics WHERE num = 1").fetchone()
+    check("#1 alt", row["alt"], "Don't we all.")
+    check("#1 scene blocks", row["scene_blocks"], 2)
+    check("#1 speakers", json.loads(row["speakers"]), ["Boy"])
+    check("#1 image path is 0001.jpg", (row["img_path"] or "").endswith("0001.jpg"), True)
+
+    row = db.execute("SELECT * FROM comics WHERE num = 300").fetchone()
+    check("#300 scene blocks (inline stage direction)", row["scene_blocks"], 0)
+    check("#300 speakers", json.loads(row["speakers"]), ["Boy", "Girl"])
+
+    check("#404 absent",
+          db.execute("SELECT COUNT(*) c FROM comics WHERE num = 404").fetchone()["c"], 0)
+
+    with_transcript = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE has_transcript = 1").fetchone()["c"]
+    check("comics with a transcript", with_transcript, 1665)
+    check("comics without a transcript", total - with_transcript, 1636)
+    check("total comics", total, 3301)
+
+    check("all transcripts are #1..#1677",
+          db.execute("SELECT MAX(num) m FROM comics WHERE has_transcript = 1").fetchone()["m"],
+          1677)
+
+    nulls = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE has_transcript = 0 AND"
+        " (scene_blocks IS NOT NULL OR dialogue_lines IS NOT NULL OR speakers IS NOT NULL)"
+    ).fetchone()["c"]
+    check("no transcript-less row carries derived text", nulls, 0)
+
+    leaking = db.execute(
+        "SELECT num FROM comics WHERE speakers LIKE '%Title text%'"
+    ).fetchall()
+    check("no metadata label leaked into speakers", [r[0] for r in leaking], [])
+
+    zombies = db.execute(
+        "SELECT num FROM comics WHERE has_transcript = 1 AND scene_blocks IS NULL"
+    ).fetchall()
+    check("every transcript has a scene-block value", [r[0] for r in zombies], [])
+
+    bad_images = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE img_path IS NOT NULL AND (img_bytes IS NULL OR img_bytes = 0)"
+    ).fetchone()["c"]
+    check("no zero-byte images recorded", bad_images, 0)
+
+    failed = 0
+    for label, ok, got, want in checks:
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}")
+        if not ok:
+            failed += 1
+            print(f"       got  {got!r}")
+            print(f"       want {want!r}")
+
+    print(f"\n{len(checks) - failed}/{len(checks)} checks passed")
+    return 1 if failed else 0
+
+
+def cmd_selftest(args):
+    db = connect()
+    init_db(db)
+    return run_selftest(db)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="xkcd.py", description="xkcd corpus tool and writer support."
