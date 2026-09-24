@@ -8,11 +8,17 @@ Subcommands: fetch, analyze, stats, pack, selftest.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import re
 import sqlite3
 import sys
+import time
+import urllib.parse
 from pathlib import Path
+
+import requests
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -228,6 +234,86 @@ def fts_query(topic):
             # Quoted words separated by spaces are an implicit AND in FTS5.
             clauses.append(" ".join(f'"{w}"' for w in words))
     return " OR ".join(clauses) or None
+
+
+RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _get(url, timeout):
+    """Single seam for HTTP so tests can replace it without a network."""
+    return requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
+
+
+def request_json(url, attempts=3, backoff=1.0, timeout=30):
+    """GET a URL and parse JSON, retrying transient failures.
+
+    Returns None when the server answers 404, which for info.0.json means the
+    comic does not exist. Raises after exhausting attempts.
+    """
+    last = None
+    for attempt in range(attempts):
+        try:
+            response = _get(url, timeout)
+            if response.status_code == 404:
+                return None
+            if response.status_code in RETRY_STATUS:
+                raise requests.HTTPError(f"HTTP {response.status_code}")
+            response.raise_for_status()
+            return response.json()
+        except (requests.RequestException, ValueError) as exc:
+            last = exc
+            if attempt < attempts - 1:
+                time.sleep(backoff * (2**attempt))
+    raise last
+
+
+def image_filename(url):
+    """The image's original filename, exactly as xkcd spells it."""
+    return (url or "").rsplit("/", 1)[-1]
+
+
+def encode_image_url(url):
+    """Percent-encode only the filename.
+
+    Measured cases: `barrel_cropped_(1).jpg` -> `barrel_cropped_%281%29.jpg`, and
+    `#859`'s `(.png` -> `%28.png`.
+    """
+    head, _, name = (url or "").rpartition("/")
+    if not head:
+        return urllib.parse.quote(url or "")
+    return head + "/" + urllib.parse.quote(name)
+
+
+def has_static_image(img_url):
+    """False for the two comics whose img is a bare directory URL (#1608, #1663)."""
+    return bool(image_filename(img_url).strip())
+
+
+def is_interactive(num, img_url):
+    """True when the comic has no static image, ships animation, or is JS-driven."""
+    if not has_static_image(img_url):
+        return True
+    if image_filename(img_url).lower().endswith(".gif"):
+        return True
+    return num in INTERACTIVE_NUMBERS
+
+
+def download_image(url, dest):
+    """Download to <dest>.part, verify it parses, then rename. Returns
+    (bytes, width, height), or None when the image is empty."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    response = _get(encode_image_url(url), 60)
+    response.raise_for_status()
+    if not response.content:
+        part.unlink(missing_ok=True)
+        return None
+    with Image.open(io.BytesIO(response.content)) as image:
+        width, height = image.size
+    part.write_bytes(response.content)
+    part.replace(dest)
+    return len(response.content), width, height
 
 
 def build_parser():

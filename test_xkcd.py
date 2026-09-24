@@ -214,6 +214,96 @@ def test_fts_query_expands_synonyms_into_a_disjunction():
     assert '"girlfriend"' in query
 
 
+class FakeResponse:
+    """Minimal stand-in for requests.Response."""
+
+    def __init__(self, status_code, payload=None, content=b""):
+        self.status_code = status_code
+        self._payload = payload
+        self.content = content
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise xkcd.requests.HTTPError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+def test_encode_image_url_percent_encodes_awkward_filenames():
+    assert xkcd.encode_image_url(
+        "https://imgs.xkcd.com/comics/barrel_cropped_(1).jpg"
+    ) == "https://imgs.xkcd.com/comics/barrel_cropped_%281%29.jpg"
+    assert xkcd.encode_image_url(
+        "https://imgs.xkcd.com/comics/(.png"
+    ) == "https://imgs.xkcd.com/comics/%28.png"
+
+
+def test_encode_image_url_leaves_ordinary_filenames_alone():
+    url = "https://imgs.xkcd.com/comics/fourier.jpg"
+    assert xkcd.encode_image_url(url) == url
+
+
+def test_image_filename_returns_the_original_name():
+    assert xkcd.image_filename(
+        "https://imgs.xkcd.com/comics/barrel_cropped_(1).jpg"
+    ) == "barrel_cropped_(1).jpg"
+
+
+def test_has_static_image_rejects_a_bare_directory_url():
+    assert xkcd.has_static_image("https://imgs.xkcd.com/comics/") is False
+    assert xkcd.has_static_image("https://imgs.xkcd.com/comics/throw.png") is True
+
+
+def test_is_interactive_covers_all_three_detection_mechanisms():
+    assert xkcd.is_interactive(1608, "https://imgs.xkcd.com/comics/") is True
+    assert xkcd.is_interactive(1663, "https://imgs.xkcd.com/comics/") is True
+    assert xkcd.is_interactive(2445, "https://imgs.xkcd.com/comics/checkbox.gif") is True
+    assert xkcd.is_interactive(1525, "https://imgs.xkcd.com/comics/emojic_8_ball.png") is True
+    assert xkcd.is_interactive(1, "https://imgs.xkcd.com/comics/barrel_cropped_(1).jpg") is False
+
+
+def test_request_json_retries_then_succeeds():
+    calls = {"n": 0}
+    original = xkcd._get
+
+    def flaky(url, timeout):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise xkcd.requests.ConnectionError("transient")
+        return FakeResponse(200, {"num": 1})
+
+    xkcd._get = flaky
+    try:
+        assert xkcd.request_json("https://example.test/x", backoff=0) == {"num": 1}
+    finally:
+        xkcd._get = original
+    assert calls["n"] == 3
+
+
+def test_request_json_returns_none_on_404():
+    original = xkcd._get
+    xkcd._get = lambda url, timeout: FakeResponse(404)
+    try:
+        assert xkcd.request_json("https://example.test/404") is None
+    finally:
+        xkcd._get = original
+
+
+def test_request_json_raises_after_exhausting_attempts():
+    original = xkcd._get
+    xkcd._get = lambda url, timeout: FakeResponse(503)
+    try:
+        try:
+            xkcd.request_json("https://example.test/x", attempts=2, backoff=0)
+        except xkcd.requests.RequestException:
+            pass
+        else:
+            raise AssertionError("expected a RequestException after all attempts")
+    finally:
+        xkcd._get = original
+
+
 def _run():
     tests = [
         (n, f)
