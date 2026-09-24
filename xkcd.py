@@ -501,17 +501,18 @@ def needs_image(row):
     return has_static_image(row["img_url"])
 
 
-def comic_numbers(latest_num, limit=None):
-    """Comic numbers 1..latest, excluding the nonexistent #404.
+def apply_limit(items, limit):
+    """`limit=None` means all, `limit=0` means none.
 
-    `limit` counts comics, and `limit=0` means none. A truthiness check on the
-    limit would turn `--limit 0` into a full corpus fetch, which is exactly what
-    it did before this function existed.
+    A truthiness check here is how `--limit 0` once started a full corpus fetch.
     """
-    numbers = [n for n in range(1, latest_num + 1) if n != 404]
-    if limit is not None:
-        numbers = numbers[:limit]
-    return numbers
+    items = list(items)
+    return items if limit is None else items[:limit]
+
+
+def comic_numbers(latest_num, limit=None):
+    """Comic numbers 1..latest, excluding the nonexistent #404."""
+    return apply_limit((n for n in range(1, latest_num + 1) if n != 404), limit)
 
 
 def cmd_fetch(args):
@@ -571,6 +572,88 @@ def cmd_fetch(args):
         time.sleep(args.delay)
 
     print(f"\nfetched {fetched}, skipped {skipped}, failed {len(failures)}")
+    for num, why in failures[:40]:
+        print(f"  #{num}: {why}")
+    if failures:
+        print(f"  ... {len(failures)} total failures")
+    return 1 if failures else 0
+
+
+def pending_explain_numbers(db, limit=None):
+    """Comics with no official transcript and no explainxkcd fetch recorded.
+
+    `explain_fetched_at` is the marker, not the presence of text, so a page that
+    legitimately has no Transcript section is not retried forever.
+    """
+    numbers = [
+        row[0]
+        for row in db.execute(
+            "SELECT num FROM comics WHERE has_transcript = 0"
+            " AND explain_fetched_at IS NULL ORDER BY num"
+        )
+    ]
+    return apply_limit(numbers, limit)
+
+
+def store_explain(db, num, text, incomplete):
+    """Record a fetch attempt. `text` may be empty, which still counts as done."""
+    db.execute(
+        "UPDATE comics SET explain_transcript = ?, explain_fetched_at = ?,"
+        " explain_incomplete = ? WHERE num = ?",
+        (text, time.strftime("%Y-%m-%dT%H:%M:%S"), 1 if incomplete else 0, num),
+    )
+    db.commit()
+
+
+def i_store_explain_page(db, num, page):
+    """Extract and store one page's transcript. Returns False when the extracted
+    text contains leaked Talk-page markup, in which case nothing is stored."""
+    text, incomplete = extract_transcript(page)
+    if has_leaked_markup(text):
+        return False
+    store_explain(db, num, text, incomplete)
+    return True
+
+
+def cmd_fetch_explain(args):
+    db = connect()
+    init_db(db)
+
+    pending = pending_explain_numbers(db, args.limit)
+    fetched = empty = failed = leaked = incomplete = 0
+    failures = []
+
+    for index, num in enumerate(pending, 1):
+        try:
+            page = fetch_explain_html(num)
+        except Exception as exc:
+            failures.append((num, f"fetch: {type(exc).__name__}"))
+            failed += 1
+            time.sleep(args.delay)
+            continue
+
+        text, is_incomplete = extract_transcript(page)
+        if has_leaked_markup(text):
+            failures.append((num, "leaked markup, not stored"))
+            leaked += 1
+        else:
+            store_explain(db, num, text, is_incomplete)
+            if text.strip():
+                fetched += 1
+                if is_incomplete:
+                    incomplete += 1
+            else:
+                empty += 1
+
+        if index % 50 == 0:
+            print(f"  {index}/{len(pending)}  stored={fetched} empty={empty}"
+                  f" failed={len(failures)}")
+        time.sleep(args.delay)
+
+    print(
+        f"\nstored {fetched} ({incomplete} flagged incomplete), {empty} empty, "
+        f"{len(failures)} failed"
+    )
     for num, why in failures[:40]:
         print(f"  #{num}: {why}")
     if failures:
@@ -922,6 +1005,15 @@ def build_parser():
     fetch.add_argument("--delay", type=float, default=0.15,
                        help="seconds to wait between requests")
 
+    explain = sub.add_parser(
+        "fetch-explain",
+        help="fetch transcripts from explainxkcd for comics that lack one",
+    )
+    explain.add_argument("--limit", type=int, default=None,
+                         help="stop after this many comics (for testing)")
+    explain.add_argument("--delay", type=float, default=1.0,
+                         help="seconds between requests; robots.txt asks for 1")
+
     sub.add_parser("analyze", help="compute derived text fields")
 
     stats = sub.add_parser("stats", help="print corpus statistics")
@@ -937,9 +1029,19 @@ def build_parser():
     return parser
 
 
+def resolve_handler(command):
+    """The handler for a subcommand name, or None.
+
+    argparse reports a hyphenated subcommand as `fetch-explain`, and
+    `"cmd_" + "fetch-explain"` is not a Python identifier, so the lookup used to
+    return None and the command exited 2 without ever running.
+    """
+    return globals().get("cmd_" + (command or "").replace("-", "_"))
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    handler = globals().get("cmd_" + args.command)
+    handler = resolve_handler(args.command)
     if handler is None:
         print(f"error: '{args.command}' is not implemented", file=sys.stderr)
         return 2

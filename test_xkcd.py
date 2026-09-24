@@ -706,6 +706,85 @@ def test_fetch_explain_html_uses_the_seam():
     assert "Transcript" in page
 
 
+def test_apply_limit_zero_means_none():
+    """Review Focus 5: the same falsy-zero bug --limit 0 hit in `fetch`."""
+    assert xkcd.apply_limit([1, 2, 3], 0) == []
+    assert xkcd.apply_limit([1, 2, 3], None) == [1, 2, 3]
+    assert xkcd.apply_limit([1, 2, 3], 2) == [1, 2]
+
+
+def test_comic_numbers_still_honours_zero_after_delegating():
+    assert xkcd.comic_numbers(10, 0) == []
+    assert xkcd.comic_numbers(5, None) == [1, 2, 3, 4, 5]
+
+
+def test_pending_explain_numbers_only_lists_comics_without_one():
+    assert xkcd.pending_explain_numbers(seeded_db()) == [2, 3]
+
+
+def test_pending_explain_numbers_skips_already_fetched_rows():
+    """Review Focus 4: a rerun must not re-fetch what it already has."""
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]", False)
+    assert xkcd.pending_explain_numbers(db) == [3]
+
+
+def test_pending_explain_numbers_retries_rows_that_never_succeeded():
+    db = seeded_db()
+    assert xkcd.pending_explain_numbers(db) == [2, 3]
+
+
+def test_pending_explain_numbers_honours_limit_zero():
+    assert xkcd.pending_explain_numbers(seeded_db(), 0) == []
+
+
+def test_store_explain_records_text_and_marks_it_fetched():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]", False)
+    row = db.execute("SELECT * FROM comics WHERE num = 2").fetchone()
+    assert row["explain_transcript"] == "[a scene]"
+    assert row["explain_incomplete"] == 0
+    assert row["explain_fetched_at"]
+
+
+def test_store_explain_marks_an_empty_page_as_fetched():
+    """Review Focus 3: an empty page is fetched-and-empty, not retried forever."""
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "", False)
+    row = db.execute("SELECT * FROM comics WHERE num = 2").fetchone()
+    assert row["explain_transcript"] == ""
+    assert row["explain_fetched_at"]
+    assert xkcd.pending_explain_numbers(db) == [3]
+
+
+def test_store_explain_records_the_incomplete_flag():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]", True)
+    assert db.execute("SELECT explain_incomplete FROM comics WHERE num = 2").fetchone()[0] == 1
+
+
+def test_i_store_explain_page_rejects_leaked_markup_instead_of_storing_it():
+    """Review Focus 2 at the storage boundary: a page whose boundary markers are
+    missing would otherwise store Talk-page prose as a transcript."""
+    db = seeded_db()
+    page = ('<h2><span class="mw-headline" id="Transcript">Transcript</span></h2>'
+            '<dl><dd>[a scene]</dd></dl>'
+            '<p><b>Add comment</b> Retrieved from "https://x/1"</p>')
+    assert xkcd.i_store_explain_page(db, 3, page) is False
+    assert not db.execute("SELECT explain_fetched_at FROM comics WHERE num = 3").fetchone()[0]
+
+
+def test_resolve_handler_normalises_hyphenated_commands():
+    """`fetch-explain` resolved to `cmd_fetch-explain`, which is not a Python
+    identifier, so the lookup returned None and the command exited 2."""
+    for command in ("fetch", "fetch-explain", "analyze", "stats", "pack", "selftest"):
+        assert callable(xkcd.resolve_handler(command)), command
+
+
+def test_resolve_handler_returns_none_for_an_unknown_command():
+    assert xkcd.resolve_handler("definitely-not-a-command") is None
+
+
 def _run():
     tests = [
         (n, f)
