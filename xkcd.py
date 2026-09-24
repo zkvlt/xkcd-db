@@ -316,6 +316,135 @@ def download_image(url, dest):
     return len(response.content), width, height
 
 
+RAW_FIELDS = ("num", "title", "safe_title", "alt", "transcript", "news", "link")
+
+
+def _iso_date(payload):
+    """xkcd returns month and day unpadded. Produce YYYY-MM-DD."""
+    year = str(payload.get("year") or "").strip()
+    month = str(payload.get("month") or "").strip()
+    day = str(payload.get("day") or "").strip()
+    if not (year and month and day):
+        return ""
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+
+
+def upsert_comic(db, payload):
+    """Insert or refresh one comic's raw fields. Idempotent.
+
+    Unknown keys are ignored rather than rejected; #2198 ships an undocumented
+    `extra_parts` key.
+    """
+    values = {field: (payload.get(field) or "") for field in RAW_FIELDS}
+    values["date"] = _iso_date(payload)
+    values["img_url"] = payload.get("img") or ""
+    db.execute(
+        """
+        INSERT INTO comics (num, title, safe_title, alt, transcript, news, link,
+                            date, img_url, fetched_at)
+        VALUES (:num, :title, :safe_title, :alt, :transcript, :news, :link,
+                :date, :img_url, :fetched_at)
+        ON CONFLICT(num) DO UPDATE SET
+            title = excluded.title,
+            safe_title = excluded.safe_title,
+            alt = excluded.alt,
+            transcript = excluded.transcript,
+            news = excluded.news,
+            link = excluded.link,
+            date = excluded.date,
+            img_url = excluded.img_url,
+            fetched_at = excluded.fetched_at
+        """,
+        {**values, "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S")},
+    )
+    db.commit()
+
+
+def image_dest(num, img_url):
+    """data/comics/0001.jpg, or None when the comic has no static image."""
+    name = image_filename(img_url).strip()
+    if not name:
+        return None
+    return COMICS_DIR / f"{num:04d}{Path(name).suffix.lower() or '.png'}"
+
+
+def needs_image(row):
+    """True when an image is expected but not yet on disk.
+
+    Distinguishes 'never had one' from 'download failed' without needing a status
+    column: a bare directory URL means none was ever expected.
+    """
+    if row["img_path"]:
+        return False
+    return has_static_image(row["img_url"])
+
+
+def cmd_fetch(args):
+    db = connect()
+    init_db(db)
+
+    latest = request_json(LATEST_URL)
+    if latest is None:
+        print("error: could not read the latest comic number", file=sys.stderr)
+        return 2
+
+    numbers = [n for n in range(1, latest["num"] + 1) if n != 404]
+    if args.limit:
+        numbers = numbers[: args.limit]
+
+    fetched = skipped = 0
+    failures = []
+
+    for index, num in enumerate(numbers, 1):
+        existing = db.execute(
+            "SELECT img_url, img_path FROM comics WHERE num = ?", (num,)
+        ).fetchone()
+
+        if existing is not None and not needs_image(existing):
+            skipped += 1
+            continue
+
+        payload = request_json(INFO_URL.format(num=num))
+        if payload is None:
+            failures.append((num, "no metadata"))
+            continue
+
+        upsert_comic(db, payload)
+        fetched += 1
+
+        img_url = payload.get("img") or ""
+        dest = image_dest(num, img_url)
+        if dest is not None:
+            try:
+                downloaded = download_image(img_url, dest)
+            except Exception as exc:
+                downloaded = None
+                failures.append((num, f"image: {type(exc).__name__}"))
+            if downloaded is None:
+                if not any(f[0] == num for f in failures):
+                    failures.append((num, "empty image"))
+            else:
+                size, width, height = downloaded
+                db.execute(
+                    "UPDATE comics SET img_path = ?, img_bytes = ?, img_width = ?,"
+                    " img_height = ? WHERE num = ?",
+                    (str(dest.relative_to(ROOT)), size, width, height, num),
+                )
+                db.commit()
+
+        if index % 100 == 0:
+            print(f"  {index}/{len(numbers)}  new={fetched} skipped={skipped}")
+
+        time.sleep(args.delay)
+
+    print(f"\nfetched {fetched}, skipped {skipped}, failed {len(failures)}")
+    for num, why in failures[:40]:
+        print(f"  #{num}: {why}")
+    if failures:
+        print(f"  ... {len(failures)} total failures")
+    return 1 if failures else 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="xkcd.py", description="xkcd corpus tool and writer support."

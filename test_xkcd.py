@@ -304,6 +304,72 @@ def test_request_json_raises_after_exhausting_attempts():
         xkcd._get = original
 
 
+PAYLOAD_1 = {
+    "num": 1,
+    "title": "Barrel - Part 1",
+    "safe_title": "Barrel - Part 1",
+    "alt": "Don't we all.",
+    "transcript": COMIC_1,
+    "news": "",
+    "link": "",
+    "year": "2006",
+    "month": "1",
+    "day": "1",
+    "img": "https://imgs.xkcd.com/comics/barrel_cropped_(1).jpg",
+}
+
+
+def test_upsert_comic_assembles_an_iso_date():
+    db = tmpdb()
+    xkcd.upsert_comic(db, PAYLOAD_1)
+    row = db.execute("SELECT * FROM comics WHERE num = 1").fetchone()
+    assert row["date"] == "2006-01-01"
+    assert row["alt"] == "Don't we all."
+    assert row["img_url"].endswith("barrel_cropped_(1).jpg")
+
+
+def test_upsert_comic_pads_single_digit_months_and_days():
+    db = tmpdb()
+    payload = dict(PAYLOAD_1, year="2015", month="11", day="9")
+    xkcd.upsert_comic(db, payload)
+    assert db.execute("SELECT date FROM comics").fetchone()["date"] == "2015-11-09"
+
+
+def test_upsert_comic_is_idempotent():
+    db = tmpdb()
+    xkcd.upsert_comic(db, PAYLOAD_1)
+    xkcd.upsert_comic(db, PAYLOAD_1)
+    assert db.execute("SELECT COUNT(*) c FROM comics").fetchone()["c"] == 1
+
+
+def test_upsert_comic_ignores_unknown_keys():
+    """#2198 ships an undocumented `extra_parts` key."""
+    db = tmpdb()
+    xkcd.upsert_comic(db, dict(PAYLOAD_1, extra_parts={"headerextra": "<style>"}))
+    assert db.execute("SELECT COUNT(*) c FROM comics").fetchone()["c"] == 1
+
+
+def test_image_dest_keeps_the_original_extension():
+    dest = xkcd.image_dest(1, "https://imgs.xkcd.com/comics/barrel_cropped_(1).jpg")
+    assert dest.name == "0001.jpg"
+
+
+def test_needs_image_true_when_a_previous_download_failed():
+    row = {"img_url": "https://imgs.xkcd.com/comics/throw.png", "img_path": None}
+    assert xkcd.needs_image(row) is True
+
+
+def test_needs_image_false_when_already_downloaded():
+    row = {"img_url": "https://imgs.xkcd.com/comics/throw.png",
+           "img_path": "data/comics/2198.png"}
+    assert xkcd.needs_image(row) is False
+
+
+def test_needs_image_false_when_the_comic_has_no_static_image():
+    row = {"img_url": "https://imgs.xkcd.com/comics/", "img_path": None}
+    assert xkcd.needs_image(row) is False
+
+
 def _run():
     tests = [
         (n, f)
