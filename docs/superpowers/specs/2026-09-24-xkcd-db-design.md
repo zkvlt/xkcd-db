@@ -20,8 +20,9 @@ multi-user requirement, no service to host, and no build pipeline to wire up.
 
 1. Every comic that ships a static image is on disk, with metadata in the
    database, and the fetch is resumable.
-2. The derived analysis fields are populated for the whole corpus, and the
-   aggregate stats are real numbers rather than claims.
+2. The derived analysis fields are populated wherever the source text supports
+   them, left null where it does not, and the aggregate stats are real numbers
+   rather than claims.
 3. `pack "<topic>"` returns exemplar comics a human would agree are relevant to
    that topic.
 4. The writer skill produces a comic script that reads like xkcd: a title, an
@@ -52,6 +53,38 @@ multi-user requirement, no service to host, and no build pipeline to wire up.
 Stack verified on this machine before the design was written: FTS5 available in
 the system `sqlite3`, `numpy`/`pandas`/`requests`/`PIL` importable, `jq` and
 `curl` present, 13GB free disk. xkcd's latest comic at design time is `#3302`.
+
+## Corpus facts measured during planning
+
+All 3301 comics were probed before this spec was amended. Zero requests failed.
+These numbers are measurements, not estimates, and they changed the design.
+
+| Fact | Value |
+| --- | --- |
+| Comics that exist | 3301 (`#404` is absent) |
+| Latest | `#3302` |
+| With a non-empty transcript | **1665 (50.4%)** |
+| Without any transcript | **1636** |
+| Last comic with a transcript | `#1677` |
+| With alt text | 3298 (three empties) |
+| Alt text length (median / p90 / max) | 115 / 209 / 816 characters |
+| Title length (median / p90 / max) | 13 / 22 / 53 characters |
+
+Transcripts stopped being published around 2016. Everything from `#1678` onward
+is empty, and eleven comics between `#1609` and `#1677` are missing one too.
+
+This reshapes the analysis in three ways.
+
+Derived text features exist for half the corpus and are null for the other half.
+Every statistic that depends on transcript text is a statement about `#1` to
+`#1677` only, and the `stats` output says so rather than reporting a corpus-wide
+figure it cannot support.
+
+Title and alt text are the only stylistic text available for all 3301 comics, and
+alt text is the single most xkcd-specific writing in the corpus. The writer leans
+on title and alt pairs, not on transcripts.
+
+Scene blocks are not panels. See the transcript conventions below.
 
 ## Ordering
 
@@ -111,18 +144,55 @@ Derived columns, written by `analyze`, all nullable:
 
 | column | notes |
 | --- | --- |
-| `panel_count` | count of `[[...]]` blocks |
-| `dialogue_lines` | count of `Speaker: line` occurrences |
-| `characters` | JSON array of names found inside `[[...]]` |
-| `speakers` | JSON array of names followed by a colon |
-| `topics` | JSON array of taxonomy tags |
+| `scene_blocks` | count of `[[...]]` scene blocks, null when there is no transcript |
+| `dialogue_lines` | count of `Speaker: line` occurrences, null when there is no transcript |
+| `characters` | JSON array of names found inside `[[...]]`, null when there is no transcript |
+| `speakers` | JSON array of names followed by a colon, null when there is no transcript |
+| `topics` | JSON array of taxonomy tags, computed for every comic |
 | `has_transcript` | boolean |
 | `is_interactive` | boolean |
-| `title_len`, `alt_len` | character counts |
+| `title_len`, `alt_len` | character counts, computed for every comic |
 
 `comics_fts` is an FTS5 table over `title`, `alt`, and `transcript`, using
 `tokenize='porter unicode61'` so "running" matches "run". `num` is stored
 unindexed and used to join back.
+
+### Transcript conventions
+
+Transcripts are hand-written, inconsistent, and only exist for the first half of
+the corpus. The parser handles all of the following, because all of it appears in
+real data.
+
+- `[[...]]` marks a scene description. It also appears inline inside dialogue, as
+  in `Girl: [[arms in the air]] Ohmygod, mine too!`, so an inline occurrence is a
+  stage direction rather than a new panel.
+- `((...))` marks an author note about the comic. Present in 178 transcripts.
+- `{{...}}` embeds metadata, most often the alt text. Present in 1621 of 1665
+  transcripts, with measured labels: `title text` (1344), `alt text` (94), `alt`
+  (75), `alt-text` (48), `title-text` (20), `title` (11), `panel title` (4),
+  `headline` (3), `mouseover text` (2), `rollover text` (2), `legend` (1).
+- Stripping `{{...}}` and `((...))` is necessary but not sufficient. Comic `#487`
+  opens with a bare `Title text: XKCD presents a guide to numerical sex
+  positions:` outside any braces. A metadata label blocklist is therefore applied
+  after stripping, so no label matching `title`, `alt`, `mouseover`, `rollover`,
+  `subheading`, `headline`, `legend`, `panel title`, `citation`, `footnote`,
+  `author's comment`, or `options` can be recorded as a speaker. `Caption` is
+  deliberately not excluded, since a caption drawn inside a panel is part of the
+  comic.
+- Dialogue is `Speaker: line`, and a line can continue over several lines.
+- Named characters are used inconsistently. `Black Hat`, `White Hat`, and
+  `Beret Guy` appear, but `Cueball` and `Megan` appear in no transcript sampled.
+  The most common speakers are `Man`, `Woman`, `Person 1`, `Person`, `Girl`,
+  `Person 2`, `Narrator`, and `Figure`, which are positional labels rather than
+  characters. Speaker extraction stays generic and no fixed roster is assumed.
+- **187 of 1665 transcripts contain no `[[...]]` block at all.** Scene-block
+  count is therefore null-safe and frequently zero, and it is reported as scene
+  blocks rather than panels. Median across the corpus is 1, maximum is 87.
+
+Comic `#1` is the canonical fixture: two scene blocks, `Boy` as the only speaker,
+and an alt text of `Don't we all.` Comic `#300` is the stage-direction fixture:
+one scene block, even though its dialogue line reads
+`Girl: [[arms in the air]] Ohmygod, mine too!`
 
 ### Data flow
 
@@ -135,14 +205,16 @@ command is safe to interrupt and rerun.
 **`analyze`** walks every row and computes the derived fields from stored text.
 Pure functions, no I/O beyond the database, so it is cheap to rerun.
 
-**`stats`** prints aggregates: date range, panel distribution, top characters,
-topic counts, transcript coverage, title and alt length percentiles, and the
-most frequent content words after stopword removal.
+**`stats`** prints aggregates: date range, scene-block distribution, top
+speakers, topic counts, transcript coverage, title and alt length percentiles,
+and the most frequent content words after stopword removal. Any figure that
+depends on transcript text is labelled with the 1665-comic coverage it is drawn
+from.
 
 **`pack <topic>`** takes the union of two retrievals: exact taxonomy tag matches,
 and FTS5 BM25 hits over title, alt, and transcript. It returns the top eight
-exemplars with their transcripts, plus the character roster and the topic's
-corpus stats.
+exemplars with their transcripts, plus the corpus-wide speaker roster and the
+topic's corpus stats.
 
 ### Topic taxonomy
 
@@ -200,18 +272,27 @@ against the corpus directly.
 - A zero-byte or unreadable image is reported in the end-of-run summary rather
   than silently accepted.
 - A missing or empty transcript is stored as an empty string and sets
-  `has_transcript` to false. Comics with no transcript are common rather than
-  exceptional, so this is a normal state, not an error. The `analyze` run
-  reports the exact count.
+  `has_transcript` to false. This is the normal state for 1636 of 3301 comics,
+  not an error. Every derived text field stays null for those rows, in
+  particular `scene_blocks`, so corpus aggregates cannot be distorted by 1636
+  phantom zeros.
 - Existing rows and existing images are skipped, which makes every command
   idempotent.
 
 ## Known special cases
 
 - `#404` does not exist. Skipping it is required, not defensive.
+- The transcript is absent from `#1678` onward, and from eleven comics between
+  `#1609` and `#1677`. Half the corpus is title-and-alt only.
+- 187 transcripts contain no `[[...]]` block, so zero scene blocks is a valid
+  result rather than a parse failure.
+- `{{...}}` metadata blocks sit inside the transcript and look like dialogue to a
+  naive `Name:` regex. They must be stripped first.
+- Some comics carry an undocumented `extra_parts` key, seen on `#2198`. Unknown
+  keys are ignored rather than treated as errors.
 - Interactive comics (`1608`, `1416`, `1110`, `1525`, and similar) ship
   JavaScript or animation rather than a static panel. They are flagged
-  `is_interactive` and excluded from panel-count statistics.
+  `is_interactive` and excluded from scene-block statistics.
 - Images are a mix of `.png` and `.jpg`, with some `.gif`.
 - Image filenames contain parentheses and unicode, so URLs need encoding rather
   than string concatenation.
@@ -222,12 +303,17 @@ against the corpus directly.
 
 `test_xkcd.py` holds assert-based tests over the pure functions, using fixture
 strings copied from real comics. No network access in tests. Covered: transcript
-parsing, panel counting, character and speaker extraction, taxonomy tagging, the
-pack formatter, and URL encoding of awkward filenames.
+parsing, scene-block counting, `{{...}}` and `((...))` stripping, speaker and
+character extraction, taxonomy tagging, the pack formatter, FTS query escaping,
+and URL encoding of awkward filenames.
 
-There is also `xkcd.py selftest`, which asserts against known-good live data in
-the database: that comic `#1` parses into the barrel script with the boy as a
-speaker, and that every comic with a transcript has a nonzero `panel_count`.
+There is also `xkcd.py selftest`, which asserts against known-good data in the
+live database: that comic `#1` parses to two scene blocks, the alt text
+`Don't we all.`, and `Boy` as its only speaker; that comic `#300` parses to one
+scene block and not two, because its second `[[...]]` is an inline stage
+direction; that a transcript with no scene blocks yields zero rather than null
+(187 of them do); and that a comic with no transcript yields null rather than
+zero for every derived text field.
 
 ## Verification
 
@@ -236,18 +322,27 @@ Claims in this project are checked against real output, not asserted.
 | Claim | Check |
 | --- | --- |
 | Every comic downloaded | Row count equals image count on disk equals distinct nums, minus known failures, with nothing zero-byte |
-| Analysis is real | `panel_count > 0` for every comic that ships a transcript |
-| Parsing is correct | Comic `#1` yields the barrel scene, one panel, and the boy as speaker |
+| Fetch covered the corpus | 3300 rows, one per existing comic, and `#404` absent |
+| Analysis is real | Exactly 1665 rows have `has_transcript` true, and every one has a non-null `scene_blocks` value |
+| Nulls are honest | Every one of the 1636 transcript-less rows has null, not zero, for all five derived text fields |
+| Parsing is correct | Comic `#1` yields two scene blocks, the alt text `Don't we all.`, and `Boy` as its only speaker |
+| Stage directions are not panels | Comic `#300` yields one scene block, not two |
+| Metadata stripping works | `Title text` never appears in the `speakers` array of any row |
 | Retrieval is relevant | `pack "gardening"` and `pack "databases"` return comics a human agrees fit |
+| Retrieval is crash-proof | `pack` on a topic full of FTS5 metacharacters returns a result or a clean message, never a traceback |
 | The writer works | Two or three comics written on topics absent from the corpus, reviewed for whether they read like xkcd |
 
 ## Scale
 
-Roughly 3300 JSON requests plus 3300 image requests. A nine-comic sample of
-image sizes came back with a median near 65KB, which puts the full corpus at
-roughly 300 to 600MB on disk. Sequential with a short delay puts the download at
-20 to 40 minutes, which runs in the background. Analysis, stats, and retrieval
-all complete in seconds.
+3301 comics exist, so the run is 3301 metadata requests plus 3301 image
+requests. A nine-comic sample of image sizes came back with a median near 65KB,
+which puts the full corpus at roughly 300 to 600MB on disk. Sequential with a
+short delay puts the download at 20 to 40 minutes, which runs in the background.
+Analysis, stats, and retrieval all complete in seconds.
+
+Planning reconnaissance already fetched all 3301 metadata records with zero
+failures, so the endpoint is reliable at this volume. Only the images remain
+untested at scale.
 
 ## Open decisions already settled
 
