@@ -77,6 +77,71 @@ def init_db(db):
     db.commit()
 
 
+SCENE_RE = re.compile(r"\[\[(.*?)\]\]", re.S)
+META_RE = re.compile(r"\{\{(.*?)\}\}", re.S)
+NOTE_RE = re.compile(r"\(\((.*?)\)\)", re.S)
+SPEAKER_RE = re.compile(r"(?m)^[ \t]*([A-Z][\w'\u2019 \-]{0,30}?)[ \t]*:[ \t]")
+
+# Metadata labels that sit in transcripts and look exactly like dialogue.
+# `Caption` is deliberately absent: a caption drawn inside a panel is content.
+META_LABELS = re.compile(
+    r"^(?:title|alt|mouseover|rollover|subtitle|subheading|headline|legend"
+    r"|panel title|citation|footnote|author'?s comment|options|tag|medium)\b",
+    re.I,
+)
+
+
+def strip_metadata(transcript):
+    """Remove {{...}} and ((...)) blocks, which are metadata rather than dialogue."""
+    return NOTE_RE.sub("", META_RE.sub("", transcript or ""))
+
+
+def scene_blocks(transcript):
+    """Line-standing [[...]] blocks. An inline [[...]] is a stage direction.
+
+    Measured: 207 of 1665 transcripts have no standing block, 187 of them
+    because they contain no [[...]] at all.
+    """
+    transcript = transcript or ""
+    out = []
+    for match in SCENE_RE.finditer(transcript):
+        line_start = transcript.rfind("\n", 0, match.start()) + 1
+        line_end = transcript.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(transcript)
+        before = transcript[line_start:match.start()].strip()
+        after = transcript[match.end():line_end].strip()
+        if not before and not after:
+            out.append(match.group(1).strip())
+    return out
+
+
+def speakers(transcript):
+    """Speaker names in first-appearance order, with metadata labels rejected."""
+    seen = []
+    for match in SPEAKER_RE.finditer(strip_metadata(transcript)):
+        name = match.group(1).strip()
+        if META_LABELS.match(name):
+            continue
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def dialogue_lines(transcript):
+    """How many Speaker: lines the transcript contains, excluding metadata labels.
+
+    Applies the same label rejection as `speakers` so the two fields agree; a
+    bare `Title text:` line would otherwise count as dialogue in about ten
+    comics.
+    """
+    count = 0
+    for match in SPEAKER_RE.finditer(strip_metadata(transcript)):
+        if not META_LABELS.match(match.group(1).strip()):
+            count += 1
+    return count
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="xkcd.py", description="xkcd corpus tool and writer support."

@@ -76,6 +76,89 @@ def test_unknown_command_exits_2():
         raise AssertionError("expected SystemExit(2) for an unknown command")
 
 
+# Real transcripts, copied from https://xkcd.com/<n>/info.0.json
+COMIC_1 = (
+    "[[A boy sits in a barrel which is floating in an ocean.]]\n"
+    "Boy: I wonder where I'll float next?\n"
+    "[[The barrel drifts into the distance. Nothing else can be seen.]]\n"
+    "{{Alt: Don't we all.}}"
+)
+
+COMIC_300 = (
+    "{{Title: Mildly sleazy uses of Facebook, part 14:}}\n"
+    "{{subheading: Looking up someone's profile before introducing yourself}}\n"
+    "Boy: Favorite bands? Hmm...\n"
+    "Girl: Whoa, those are two of my favorites, too!\n"
+    "Girl: Clearly, we should have sex.\n"
+    "Boy: Okay!  My favorite position is the retrograde wheelbarrow.\n"
+    "Girl: [[arms in the air]] Ohmygod, mine too!\n"
+    "{{alt-text: 'Here, I'll put my number in your cell pho'}}"
+)
+
+# #487 excerpt. Note the bare `Title text:` on the first line, outside any braces.
+COMIC_487 = (
+    "Title text: XKCD presents a guide to numerical sex positions:\n"
+    "69 \n"
+    "[[traditional sixty-nine position, mutual oral sex]]\n"
+    "99 \n"
+    "[[sort of a standing doggy-style position]]\n"
+    "34 \n"
+    "Guy: Uh. \n"
+    "[[guy and girl look confusedly at each other]]\n"
+    "Narrator: Guys? \n"
+    "{{title text: We didn't even get to the continued fractions!}}"
+)
+
+
+def test_scene_blocks_counts_line_standing_blocks():
+    assert xkcd.scene_blocks(COMIC_1) == [
+        "A boy sits in a barrel which is floating in an ocean.",
+        "The barrel drifts into the distance. Nothing else can be seen.",
+    ]
+
+
+def test_scene_blocks_ignores_inline_stage_direction():
+    # #300's only [[...]] sits mid-dialogue, so it is not a panel.
+    assert xkcd.scene_blocks(COMIC_300) == []
+
+
+def test_scene_blocks_on_excerpt_counts_only_standing_lines():
+    assert len(xkcd.scene_blocks(COMIC_487)) == 3
+
+
+def test_speakers_finds_real_speakers_in_order():
+    assert xkcd.speakers(COMIC_1) == ["Boy"]
+    assert xkcd.speakers(COMIC_300) == ["Boy", "Girl"]
+    assert xkcd.speakers(COMIC_487) == ["Guy", "Narrator"]
+
+
+def test_speakers_rejects_bare_metadata_label():
+    # The bug this prevents: `Title text` becomes the corpus's 2nd common speaker.
+    assert "Title text" not in xkcd.speakers(COMIC_487)
+
+
+def test_speakers_keeps_caption_because_it_is_panel_content():
+    assert xkcd.speakers("Caption: Meanwhile...") == ["Caption"]
+
+
+def test_strip_metadata_removes_both_brace_forms():
+    stripped = xkcd.strip_metadata(COMIC_300)
+    assert "{{" not in stripped and "}}" not in stripped
+    assert "((x))" not in xkcd.strip_metadata("((x)) Boy: hi")
+
+
+def test_dialogue_lines_counts_speaker_lines_only():
+    assert xkcd.dialogue_lines(COMIC_1) == 1
+    assert xkcd.dialogue_lines(COMIC_300) == 5
+    assert xkcd.dialogue_lines("") == 0
+
+
+def test_empty_transcript_yields_empty_structures():
+    assert xkcd.scene_blocks("") == []
+    assert xkcd.speakers("") == []
+    assert xkcd.dialogue_lines("") == 0
+
+
 def _run():
     tests = [
         (n, f)
