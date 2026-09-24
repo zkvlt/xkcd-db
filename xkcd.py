@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import html
 import io
 import json
 import re
@@ -356,6 +357,85 @@ def download_image(url, dest):
     part.write_bytes(response.content)
     part.replace(dest)
     return len(response.content), width, height
+
+
+EXPLAIN_URL = "https://www.explainxkcd.com/wiki/index.php/{num}"
+EXPLAIN_USER_AGENT = (
+    "xkcd-corpus/1.0 (personal archive; 1 request/second; contact: local user)"
+)
+
+# Where a Transcript section ends. The raw page inlines the whole Talk section
+# after the transcript, so the boundary matters: terminating only on <h2> once
+# returned 16507 characters for #1700 where the real transcript is 951.
+TRANSCRIPT_END_MARKERS = (
+    '<div style="clear: both">',
+    '<span id="discussion">',
+    "<h1",
+    '<div id="catlinks"',
+    '<div class="printfooter"',
+)
+
+# Present in the Talk section and the category footer, never in a transcript.
+LEAK_MARKERS = (
+    "Add comment",
+    "Create topic",
+    "Retrieved from",
+    "Category:",
+    "Privacy policy",
+)
+
+NOTICE_RE = re.compile(
+    r"^This is one of [\d,]+ incomplete transcripts?:.*?editing the transcript!?\s*",
+    re.S | re.I,
+)
+BLOCK_CLOSE_RE = re.compile(r"</(?:p|div|li|ul|ol|dd|dt|dl)>", re.I)
+BR_RE = re.compile(r"<br\s*/?>", re.I)
+TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _get_html(url, timeout):
+    """Seam for explainxkcd HTML, kept separate from _get so the existing
+    request tests and their 2-argument monkeypatches are untouched."""
+    return requests.get(
+        url, timeout=timeout, headers={"User-Agent": EXPLAIN_USER_AGENT}
+    ).text
+
+
+def fetch_explain_html(num):
+    """The raw wiki page for one comic."""
+    return _get_html(EXPLAIN_URL.format(num=num), 30)
+
+
+def has_leaked_markup(text):
+    """True when Talk-page or footer content ended up in a transcript."""
+    low = (text or "").lower()
+    return any(marker.lower() in low for marker in LEAK_MARKERS)
+
+
+def extract_transcript(page):
+    """(text, incomplete) for an explainxkcd page.
+
+    Returns ("", False) when the page has no Transcript section, which is a
+    valid outcome rather than an error.
+    """
+    page = page or ""
+    heading = re.search(r'<h2[^>]*>.*?id="Transcript".*?</h2>', page, re.S)
+    if not heading:
+        return "", False
+
+    start = heading.end()
+    stops = [page.find(marker, start) for marker in TRANSCRIPT_END_MARKERS]
+    stops = [stop for stop in stops if stop != -1]
+    end = min(stops) if stops else len(page)
+
+    body = page[start:end]
+    text = BR_RE.sub("\n", BLOCK_CLOSE_RE.sub("\n", body))
+    text = html.unescape(TAG_RE.sub("", text))
+    text = "\n".join(line.rstrip() for line in text.split("\n")).strip()
+
+    incomplete = bool(NOTICE_RE.match(text))
+    text = NOTICE_RE.sub("", text).strip()
+    return text, incomplete
 
 
 RAW_FIELDS = ("num", "title", "safe_title", "alt", "transcript", "news", "link")

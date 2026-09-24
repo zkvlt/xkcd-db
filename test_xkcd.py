@@ -612,6 +612,100 @@ def test_migrate_is_idempotent():
     assert "explain_transcript" in columns(db)
 
 
+# Mirrors the real page structure: the Transcript section, then the Talk section
+# inlined after a clear-float div. The leak markers are the ones present on the
+# live pages. Small and synthetic rather than copied wiki text, which also keeps
+# CC BY-SA content out of this repository.
+EXPLAIN_PAGE = """<html><body>
+<h2><span class="mw-headline" id="Transcript">Transcript</span>\
+<span class="mw-editsection">[edit]</span></h2>
+<dl><dd>[Megan is standing in front of a chart.]</dd>\
+<dd>Megan: Only two instruments remain.</dd></dl>
+<p><br></p><div style="clear: both"></div><p><span id="discussion"></span>\
+<b>Add comment</b> &nbsp; Create topic (use sparingly)</p>
+<h1><span class="mw-headline" id="Discussion">Discussion</span></h1>
+<p>I think the chart is wrong.</p>
+<div>Retrieved from "https://www.explainxkcd.com/wiki/index.php/3302"</div>
+<div id="catlinks"><p class="catlinks">Category: Comics</p></div>
+</body></html>"""
+
+EXPLAIN_PAGE_INCOMPLETE = """<html><body>
+<h2><span class="mw-headline" id="Transcript">Transcript</span></h2>
+This is one of 36 incomplete transcripts:
+Don't remove this notice too soon. You can help by editing the transcript!
+<dl><dd>[Megan is standing in front of a chart.]</dd>\
+<dd>Megan: Only two instruments remain.</dd></dl>
+<p><br></p><div style="clear: both"></div>
+<h1><span class="mw-headline" id="Discussion">Discussion</span></h1>
+<p>Retrieved from "https://www.explainxkcd.com/wiki/index.php/3302"</p>
+</body></html>"""
+
+EXPLAIN_PAGE_NO_SECTION = """<html><body>
+<h2><span class="mw-headline" id="Explanation">Explanation</span></h2>
+<p>Some prose about the comic.</p>
+</body></html>"""
+
+
+def test_extract_transcript_returns_the_section_text():
+    text, incomplete = xkcd.extract_transcript(EXPLAIN_PAGE)
+    assert "[Megan is standing in front of a chart.]" in text
+    assert "Megan: Only two instruments remain." in text
+    assert incomplete is False
+
+
+def test_extract_transcript_does_not_leak_the_talk_section():
+    """Review Focus 2: the bug that returned 16507 chars for #1700."""
+    text, _ = xkcd.extract_transcript(EXPLAIN_PAGE)
+    assert xkcd.has_leaked_markup(text) is False
+    for marker in ("Add comment", "Create topic", "Retrieved from", "Category:"):
+        assert marker not in text, marker
+
+
+def test_extract_transcript_strips_the_incomplete_notice_and_flags_it():
+    text, incomplete = xkcd.extract_transcript(EXPLAIN_PAGE_INCOMPLETE)
+    assert incomplete is True
+    assert "incomplete transcript" not in text.lower()
+    assert "Don't remove this notice" not in text
+    assert "[Megan is standing in front of a chart.]" in text
+
+
+def test_extract_transcript_returns_empty_when_there_is_no_section():
+    """Review Focus 3, at the parsing level."""
+    assert xkcd.extract_transcript(EXPLAIN_PAGE_NO_SECTION) == ("", False)
+    assert xkcd.extract_transcript("") == ("", False)
+
+
+def test_extract_transcript_unescapes_entities_and_drops_tags():
+    page = ('<h2><span class="mw-headline" id="Transcript">Transcript</span></h2>'
+            '<dl><dd>[A &amp; B &lt;tag&gt;]</dd></dl>'
+            '<div style="clear: both"></div>')
+    text, _ = xkcd.extract_transcript(page)
+    assert text == "[A & B <tag>]"
+
+
+def test_has_leaked_markup_detects_each_marker():
+    for marker in xkcd.LEAK_MARKERS:
+        assert xkcd.has_leaked_markup(f"line one\n{marker}\nline two") is True
+    assert xkcd.has_leaked_markup("[clean scene]\nMan: hello") is False
+
+
+def test_fetch_explain_html_uses_the_seam():
+    calls = {}
+
+    def fake(url, timeout):
+        calls["url"] = url
+        return EXPLAIN_PAGE
+
+    original = xkcd._get_html
+    xkcd._get_html = fake
+    try:
+        page = xkcd.fetch_explain_html(3302)
+    finally:
+        xkcd._get_html = original
+    assert calls["url"] == "https://www.explainxkcd.com/wiki/index.php/3302"
+    assert "Transcript" in page
+
+
 def _run():
     tests = [
         (n, f)
