@@ -376,12 +376,15 @@ TRANSCRIPT_END_MARKERS = (
 )
 
 # Present in the Talk section and the category footer, never in a transcript.
+# "Privacy policy" is deliberately absent: #1998's panel text IS a privacy
+# policy notice, and across 1621 stored transcripts this marker fired only on
+# that false positive. A marker broad enough to appear in a comic catches
+# nothing.
 LEAK_MARKERS = (
     "Add comment",
     "Create topic",
     "Retrieved from",
     "Category:",
-    "Privacy policy",
 )
 
 NOTICE_RE = re.compile(
@@ -1078,7 +1081,10 @@ def run_selftest(db):
     unsourced = db.execute(
         "SELECT COUNT(*) c FROM comics WHERE COALESCE(transcript_source, 'none') = 'none'"
     ).fetchone()["c"]
-    check("every comic has a transcript source", unsourced, 0)
+    # 1 is the measured figure: #3283's explainxkcd Transcript section contains
+    # only the wiki's "help us write this transcript" notice, so it has no text
+    # from either source. Raise this if a fetch or parse regression makes more.
+    check("comics with no transcript from either source", unsourced, 1)
 
     missing_blocks = db.execute(
         "SELECT COUNT(*) c FROM comics WHERE has_transcript = 1 AND scene_blocks IS NULL"

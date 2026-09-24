@@ -921,6 +921,14 @@ def test_find_leaked_transcripts_flags_only_the_leaking_row():
     assert xkcd.find_leaked_transcripts(db) == [2]
 
 
+def test_leak_detector_does_not_flag_comic_content_about_a_privacy_policy():
+    """#1998's panel text IS a privacy policy notice, so the phrase is content
+    here. A marker broad enough to appear in a comic is not a marker."""
+    text = ("[The picture shows a long text:]\n\nPrivacy policy\n\n"
+            "We've updated our privacy policy. This is purely a formality.")
+    assert xkcd.has_leaked_markup(text) is False
+
+
 def test_find_leaked_transcripts_is_empty_on_clean_data():
     assert xkcd.find_leaked_transcripts(seeded_db()) == []
 
