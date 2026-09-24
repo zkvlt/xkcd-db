@@ -583,15 +583,21 @@ def cmd_fetch(args):
 
 
 def pending_explain_numbers(db, limit=None):
-    """Comics with no official transcript and no explainxkcd fetch recorded.
+    """Comics with no transcript from xkcd and no explainxkcd fetch recorded.
 
-    `explain_fetched_at` is the marker, not the presence of text, so a page that
-    legitimately has no Transcript section is not retried forever.
+    Reads the raw `transcript` column rather than the derived `has_transcript`,
+    because that derived field is NULL until `analyze` runs and the documented
+    rebuild order is fetch, fetch-explain, analyze. Filtering on it made this
+    silently return nothing on a fresh rebuild.
+
+    `explain_fetched_at` is the marker for the second half, not the presence of
+    text, so a page that legitimately has no Transcript section is not retried
+    forever.
     """
     numbers = [
         row[0]
         for row in db.execute(
-            "SELECT num FROM comics WHERE has_transcript = 0"
+            "SELECT num FROM comics WHERE TRIM(COALESCE(transcript, '')) = ''"
             " AND explain_fetched_at IS NULL ORDER BY num"
         )
     ]
@@ -608,14 +614,20 @@ def store_explain(db, num, text, incomplete):
     db.commit()
 
 
-def i_store_explain_page(db, num, page):
-    """Extract and store one page's transcript. Returns False when the extracted
-    text contains leaked Talk-page markup, in which case nothing is stored."""
+def store_explain_page(db, num, page):
+    """Extract and store one page's transcript.
+
+    Returns (text, incomplete), or None when the extraction contained leaked
+    Talk-page markup, in which case nothing is stored.
+
+    `cmd_fetch_explain` calls this rather than repeating the guard inline, so the
+    leak check that tests exercise is the one the command actually runs.
+    """
     text, incomplete = extract_transcript(page)
     if has_leaked_markup(text):
-        return False
+        return None
     store_explain(db, num, text, incomplete)
-    return True
+    return text, incomplete
 
 
 def cmd_fetch_explain(args):
@@ -635,12 +647,12 @@ def cmd_fetch_explain(args):
             time.sleep(args.delay)
             continue
 
-        text, is_incomplete = extract_transcript(page)
-        if has_leaked_markup(text):
+        result = store_explain_page(db, num, page)
+        if result is None:
             failures.append((num, "leaked markup, not stored"))
             leaked += 1
         else:
-            store_explain(db, num, text, is_incomplete)
+            text, is_incomplete = result
             if text.strip():
                 fetched += 1
                 if is_incomplete:
@@ -665,7 +677,7 @@ def cmd_fetch_explain(args):
 
 
 # explainxkcd writes a line-standing scene as [scene]; xkcd uses [[scene]].
-STANDING_SINGLE_RE = re.compile(r"(?m)^[ \t]*\[(?!\[)(.*?)\][ \t]*$")
+STANDING_SINGLE_RE = re.compile(r"(?m)^[ \t]*\[(?!\[)([^\[\]]*)\][ \t]*$")
 
 
 def normalise_blocks(text):

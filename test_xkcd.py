@@ -862,17 +862,6 @@ def test_store_explain_records_the_incomplete_flag():
     assert db.execute("SELECT explain_incomplete FROM comics WHERE num = 2").fetchone()[0] == 1
 
 
-def test_i_store_explain_page_rejects_leaked_markup_instead_of_storing_it():
-    """Review Focus 2 at the storage boundary: a page whose boundary markers are
-    missing would otherwise store Talk-page prose as a transcript."""
-    db = seeded_db()
-    page = ('<h2><span class="mw-headline" id="Transcript">Transcript</span></h2>'
-            '<dl><dd>[a scene]</dd></dl>'
-            '<p><b>Add comment</b> Retrieved from "https://x/1"</p>')
-    assert xkcd.i_store_explain_page(db, 3, page) is False
-    assert not db.execute("SELECT explain_fetched_at FROM comics WHERE num = 3").fetchone()[0]
-
-
 def test_resolve_handler_normalises_hyphenated_commands():
     """`fetch-explain` resolved to `cmd_fetch-explain`, which is not a Python
     identifier, so the lookup returned None and the command exited 2."""
@@ -931,6 +920,54 @@ def test_leak_detector_does_not_flag_comic_content_about_a_privacy_policy():
 
 def test_find_leaked_transcripts_is_empty_on_clean_data():
     assert xkcd.find_leaked_transcripts(seeded_db()) == []
+
+
+def test_pending_explain_numbers_works_before_analyze_has_run():
+    """Critical: the documented rebuild order is fetch, fetch-explain, analyze.
+
+    has_transcript is NULL until analyze runs, so filtering on it made
+    fetch-explain silently fetch nothing on a fresh rebuild.
+    """
+    db = tmpdb()
+    db.execute("INSERT INTO comics (num, title, transcript, img_url)"
+               " VALUES (1, 'A', '[[a scene]]', 'x')")
+    db.execute("INSERT INTO comics (num, title, transcript, img_url)"
+               " VALUES (2, 'B', '', 'x')")
+    db.commit()
+    assert [r[0] for r in db.execute("SELECT has_transcript FROM comics")] == [None, None]
+    assert xkcd.pending_explain_numbers(db) == [2]
+
+
+def test_normalise_blocks_does_not_span_two_bracket_groups():
+    """The inner group must not contain a bracket, or the pattern swallows
+    everything between the first and last bracket on the line."""
+    assert xkcd.normalise_blocks("[a] [b]") == "[a] [b]"
+    assert xkcd.normalise_blocks("[a] then [b]") == "[a] then [b]"
+
+
+def test_cmd_fetch_explain_uses_the_tested_leak_guard_seam():
+    """The guard is tested through store_explain_page, so the command must call
+    it rather than keeping a parallel copy that no test covers."""
+    import inspect
+    source = inspect.getsource(xkcd.cmd_fetch_explain)
+    assert "store_explain_page" in source
+    assert source.count("has_leaked_markup") == 0
+
+
+def test_store_explain_page_returns_none_when_it_refuses_to_store():
+    db = seeded_db()
+    page = ('<h2><span class="mw-headline" id="Transcript">Transcript</span></h2>'
+            '<dl><dd>[a scene]</dd></dl><p><b>Add comment</b></p>')
+    assert xkcd.store_explain_page(db, 3, page) is None
+    assert not db.execute("SELECT explain_fetched_at FROM comics WHERE num = 3").fetchone()[0]
+
+
+def test_store_explain_page_returns_the_text_when_it_stores():
+    db = seeded_db()
+    page = ('<h2><span class="mw-headline" id="Transcript">Transcript</span></h2>'
+            '<dl><dd>[a scene]</dd></dl><div style="clear: both"></div>')
+    # Raw text, not normalised: normalisation belongs to coalesced_text.
+    assert xkcd.store_explain_page(db, 3, page) == ("[a scene]", False)
 
 
 def _run():
