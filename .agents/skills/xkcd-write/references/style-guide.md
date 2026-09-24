@@ -5,17 +5,35 @@ measured, and the command that produced it is named so you can re-check it.
 
 Regenerate the raw figures with `python3 xkcd.py stats --top 25`.
 
-## Read this first: what the corpus can and cannot tell you
+## Read this first: where the corpus comes from
 
-The corpus covers 3301 comics, dated 2006-01-01 to 2026-09-23.
+The corpus covers 3301 comics, dated 2006-01-01 to 2026-09-23, and the
+structural evidence now spans nearly all of it.
 
-**1665 of them have a transcript. 1636 do not.** Transcripts stop at `#1677`,
-with a few gaps before that. Everything structural below (panel counts,
-speakers, dialogue) is therefore a statement about the first half of xkcd's
-history, not about the comic as a whole.
+Transcripts come from two sources, and they are not the same kind of text.
 
-Title and alt text exist for 3298 of 3301 comics, and that is the writing that
-spans the entire run. When you are unsure, trust the title-and-alt evidence.
+| | comics | scene blocks | speakers |
+| --- | --- | --- | --- |
+| xkcd's own, up to `#1677` | 1665 | `[[like this]]` | role labels |
+| explain xkcd | 1635 | `[like this]` | character names |
+| neither | 1 | | |
+
+xkcd publishes a transcript in its own JSON and stopped after `#1677`. The rest
+come from the explain xkcd wiki, which writes in a different style: single
+brackets for scenes, and characters named rather than described.
+
+**This guide follows xkcd's own convention.** The writer's output is an xkcd
+script, so it uses role labels and double brackets. Say the explain xkcd source
+if you are looking at it and need to remember which is which.
+
+The corpus is honest about which is which: `stats` reports every speaker count
+separately per source, never combined, and `pack` labels each exemplar
+`[official]` or `[explainxkcd]`. A combined speaker list would mix `Man` with
+`Megan` and describe neither.
+
+Title and alt text exist for 3298 of 3301 comics and span the entire run. When
+the two sources disagree about structure, trust the title-and-alt evidence,
+which does not depend on either.
 
 ## Length
 
@@ -69,31 +87,36 @@ brand name as a chemical formula.
 
 ## Structure
 
-Panel counts come from line-standing `[[...]]` scene blocks across the 1665
-transcripts. Note that this counts scene descriptions, not panels; the maximum
-of 86 is a count of descriptions in one long transcript, so treat this as a
-shape indicator rather than a precise panel count.
+Panel counts come from line-standing scene blocks across the 3300 transcripts.
+This counts scene descriptions, not panels, and the two sources describe panels
+at different granularity: the maximum of 189 belongs to one long annotated
+transcript, so treat this as a shape indicator rather than a precise panel count.
 
 | Scene blocks | Comics |
 | --- | --- |
-| 0 | 207 |
-| 1 | 673 |
-| 2 | 176 |
-| 3 | 194 |
-| 4 | 196 |
-| 5 or more | 219 |
+| 0 | 236 |
+| 1 | 986 |
+| 2 | 642 |
+| 3 | 401 |
+| 4 | 470 |
+| 5 or more | 565 |
 
-**One to four blocks covers 74% of the corpus.** One block alone is 40%. The
-most common xkcd shape by a wide margin is a single scene-setting description
-followed by dialogue, with the punchline arriving in the last line of speech.
+**One to four blocks covers 76% of the corpus.** One block alone is 30%. The
+most common xkcd shape remains a single scene-setting description followed by
+dialogue, with the punchline arriving in the last line of speech.
 
-Zero blocks is not a failure. 207 transcripts have no line-standing scene block
+Zero blocks is not a failure. 236 transcripts have no line-standing scene block
 at all, because the scene description is inline in a dialogue line rather than
 standing on its own.
 
+The figure for xkcd's own 1665 transcripts alone is 74%, which is what this
+guide reported before the wiki source was added. The two agree closely, so the
+shape guidance did not change when coverage doubled.
+
 ## Speakers
 
-The corpus does not name its characters. Across 1665 transcripts, the most
+**Use role labels. That is the rule this guide sets, and it is what xkcd's own
+published transcripts do.** Across the 1665 official transcripts, the most
 frequent speakers are:
 
 ```
@@ -107,29 +130,37 @@ frequent speakers are:
  55  Narrator       15  Computer  /  Character
 ```
 
-Two things follow from this.
-
-**Role labels are the convention.** `Man`, `Woman`, `Person 1`, `Person 2`,
-`Narrator`, `Figure`. Use these.
-
-**Proper names exist but are rare, and are not worth copying.** Across 1665
-transcripts, `Cueball` appears as a speaker in 2 comics (`#1324`, `#1486`),
-`Megan` in 1 (`#478`), and `Black Hat` in 4 (`#146`, `#1136`, `#1137`,
-`#1321`). `Megan` turns up far more often inside dialogue than as a speaker
-label. Inventing a name like `Alice` or `Bob` has no precedent here, so do not.
-
-An earlier draft of this guide claimed `Cueball` and `Megan` never appear. That
-was wrong, and it came from sampling comics rather than searching all of them.
-The figures above are from querying every transcript.
-
-**The recurring visual cast is described, not named.** The hat character appears
-as `Hat Guy` (19), `Hat guy` (10), `Black hat guy` (12), and `Black Hat` (4),
-which is 45 occurrences in total. `Beret guy` appears 11 times. These describe
-the drawing rather than name a person.
-
 `Person 1` and `Person 2` are positional labels for interchangeable speakers.
 `Caption` is a legitimate speaker, because a caption drawn inside a panel is
 part of the comic.
+
+### The characters do have names, and this guide still does not use them
+
+The explain xkcd source names characters throughout, which is why it is stored
+separately and counted separately. Across its 1635 transcripts the most frequent
+speakers are `Cueball` (606), `Megan` (274), `Ponytail` (220), `White Hat`
+(105), `Hairy` (59), `Miss Lenhart` (47), `Black Hat` (46), `Hairbun` (34), and
+`Beret Guy` (29).
+
+So the cast exists and readers recognise it. This guide still writes `Man` and
+`Person 1`, for one reason: xkcd's own text does, and the script is meant to
+read like xkcd's text rather than like the wiki's description of it. If you
+would rather name them, the list above is the established cast, and using it is
+a defensible choice. Just do not invent a name: there is no `Alice` or `Bob` in
+this comic.
+
+An earlier version of this guide claimed `Cueball` and `Megan` appeared nowhere
+in the corpus. That was wrong, and it came from sampling a few comics instead of
+searching all of them. Both names are in fact used as speakers in the official
+transcripts too, rarely: `Cueball` in 2 (`#1324`, `#1486`), `Megan` in 1
+(`#478`), `Black Hat` in 4 (`#146`, `#1136`, `#1137`, `#1321`).
+
+### The visual cast, as the official transcripts describe it
+
+The hat character appears as `Hat Guy` (19), `Hat guy` (10), `Black hat guy`
+(12), and `Black Hat` (4), 45 occurrences in total. `Beret guy` appears 11 times.
+These describe the drawing rather than name a person, which is the whole
+convention in miniature.
 
 ## Topics
 
@@ -138,30 +169,37 @@ synonyms appears anywhere in its title, alt text, or transcript, so these
 overcount. They indicate which subjects have depth, not exact totals.
 
 ```
-381  computers      103  parenting      49  cats
-314  work           101  politics       46  time-travel
-254  meta            96  social-media   44  weather
-252  space           92  maps           42  chemistry
-177  internet        89  existential    40  gardening
-148  physics         88  sex            27  economics
-144  statistics      80  history        20  climate
-131  romance         78  engineering    14  philosophy
-127  health          76  programming
-119  food            72  linguistics
-113  math            71  biology
-                     55  ai
+570  computers      142  parenting      74  cats
+569  meta           139  engineering    70  weather
+544  work           137  history        53  economics
+459  space          131  existential    42  climate
+272  internet       120  biology        27  philosophy
+250  statistics     118  programming
+237  physics        103  linguistics
+197  romance        103  sex
+185  math            94  time-travel
+175  health          85  chemistry
+167  food            83  gardening
+160  maps            79  ai
+159  politics
+154  social-media
 ```
 
-Subjects with real depth: computing and the internet, work and office life,
-space and physics, mathematics and statistics, romance and relationships, and
-the self-referential `meta` bucket.
+One caveat introduced by full coverage. These counts now include explain xkcd's
+descriptive prose, and that prose is written *about* comics: it says "panel",
+"comic", and "caption" constantly. The `meta` bucket therefore reads 569, up
+from 254 when only xkcd's own text was counted, and much of that rise is the
+source describing itself rather than a real shift in what xkcd writes about.
+Read `meta` with that in mind. The other subjects are less affected, since a
+comic about physics is described with physics words either way.
 
-Subjects with almost no depth: philosophy (14), climate (20), economics (27),
-gardening (40). A comic about gardening is nearly unexplored ground.
+Subjects with real depth: computing, work and office life, space, physics,
+mathematics and statistics, romance and relationships, and the self-referential
+`meta` bucket.
 
-The `meta` bucket at 254 is worth noting. xkcd writes about being a webcomic,
-about its own panels and alt text, often enough that self-reference is a
-first-class subject rather than a novelty.
+Subjects with the least depth: philosophy (27), climate (42), economics (53).
+A comic about any of those is still close to unexplored, and all three offer
+room that the corpus itself shows is thin.
 
 ## Recurring devices
 
@@ -202,11 +240,15 @@ committed to the first reading.
 
 Things the corpus never does.
 
-**The alt text never summarises the panels.** Not once in 3298 comics is the
-alt a description of what happened. If your alt would work as a caption, it is
-the wrong alt.
+**The alt text never summarises the panels.** The alt extends or subverts the
+comic. If your alt would work as a caption for what happened, it is the wrong
+alt. This is stated as a rule about the form; the evidence is the 3298 alts
+themselves, all of which make a second move rather than describing the first.
 
-**Speakers are never proper names.** See above.
+**xkcd's own transcripts never name their speakers.** The wiki source does, so
+naming is not unprecedented in the corpus, but a script that says `Megan` rather
+than `Woman` is following the wiki's descriptive style rather than xkcd's
+published text. The section above explains the choice in full.
 
 **The punchline is never explained.** The script stops after the joke. There is
 no narration line telling the reader what to conclude.
@@ -225,7 +267,8 @@ mild. The humour comes from the situation and the last line, not from volume.
 Before shipping a script, confirm all six:
 
 1. The alt text is a second beat, not a summary.
-2. No speaker is a proper name.
+2. Speakers are role labels (`Man`, `Woman`, `Person 1`), matching xkcd's own
+   transcripts.
 3. Panel count is between 1 and 4.
 4. Every `[[...]]` stands alone on its own line.
 5. The scene description is one spare sentence.

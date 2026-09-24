@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import html
 import io
 import json
 import re
@@ -56,7 +57,11 @@ CREATE TABLE IF NOT EXISTS comics (
     has_transcript  INTEGER,
     is_interactive  INTEGER,
     title_len       INTEGER,
-    alt_len         INTEGER
+    alt_len         INTEGER,
+    explain_transcript  TEXT,
+    explain_fetched_at  TEXT,
+    explain_incomplete  INTEGER,
+    transcript_source   TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS comics_fts USING fts5(
@@ -78,9 +83,34 @@ def connect(path=DB_PATH):
     return db
 
 
+# Columns added after the table was first created. CREATE TABLE IF NOT EXISTS
+# will not add them to an existing database, and there is a live 3301-row corpus
+# that must upgrade in place rather than be re-fetched for 61 minutes.
+MIGRATIONS = {
+    "explain_transcript": "TEXT",
+    "explain_fetched_at": "TEXT",
+    "explain_incomplete": "INTEGER",
+    "transcript_source": "TEXT",
+}
+
+
+def migrate(db):
+    """Add any columns the existing table is missing. Idempotent.
+
+    The column names come from MIGRATIONS, whose keys are literal identifiers in
+    this file, so no outside value reaches the SQL.
+    """
+    have = {row[1] for row in db.execute("PRAGMA table_info(comics)")}
+    for column, kind in MIGRATIONS.items():
+        if column not in have:
+            db.execute(f"ALTER TABLE comics ADD COLUMN {column} {kind}")
+    db.commit()
+
+
 def init_db(db):
-    """Create the schema if it is not already present."""
+    """Create the schema if absent, then add any columns added since."""
     db.executescript(SCHEMA)
+    migrate(db)
     db.commit()
 
 
@@ -329,6 +359,88 @@ def download_image(url, dest):
     return len(response.content), width, height
 
 
+EXPLAIN_URL = "https://www.explainxkcd.com/wiki/index.php/{num}"
+EXPLAIN_USER_AGENT = (
+    "xkcd-corpus/1.0 (personal archive; 1 request/second; contact: local user)"
+)
+
+# Where a Transcript section ends. The raw page inlines the whole Talk section
+# after the transcript, so the boundary matters: terminating only on <h2> once
+# returned 16507 characters for #1700 where the real transcript is 951.
+TRANSCRIPT_END_MARKERS = (
+    '<div style="clear: both">',
+    '<span id="discussion">',
+    "<h1",
+    '<div id="catlinks"',
+    '<div class="printfooter"',
+)
+
+# Present in the Talk section and the category footer, never in a transcript.
+# "Privacy policy" is deliberately absent: #1998's panel text IS a privacy
+# policy notice, and across 1621 stored transcripts this marker fired only on
+# that false positive. A marker broad enough to appear in a comic catches
+# nothing.
+LEAK_MARKERS = (
+    "Add comment",
+    "Create topic",
+    "Retrieved from",
+    "Category:",
+)
+
+NOTICE_RE = re.compile(
+    r"^This is one of [\d,]+ incomplete transcripts?:.*?editing the transcript!?\s*",
+    re.S | re.I,
+)
+BLOCK_CLOSE_RE = re.compile(r"</(?:p|div|li|ul|ol|dd|dt|dl)>", re.I)
+BR_RE = re.compile(r"<br\s*/?>", re.I)
+TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _get_html(url, timeout):
+    """Seam for explainxkcd HTML, kept separate from _get so the existing
+    request tests and their 2-argument monkeypatches are untouched."""
+    return requests.get(
+        url, timeout=timeout, headers={"User-Agent": EXPLAIN_USER_AGENT}
+    ).text
+
+
+def fetch_explain_html(num):
+    """The raw wiki page for one comic."""
+    return _get_html(EXPLAIN_URL.format(num=num), 30)
+
+
+def has_leaked_markup(text):
+    """True when Talk-page or footer content ended up in a transcript."""
+    low = (text or "").lower()
+    return any(marker.lower() in low for marker in LEAK_MARKERS)
+
+
+def extract_transcript(page):
+    """(text, incomplete) for an explainxkcd page.
+
+    Returns ("", False) when the page has no Transcript section, which is a
+    valid outcome rather than an error.
+    """
+    page = page or ""
+    heading = re.search(r'<h2[^>]*>.*?id="Transcript".*?</h2>', page, re.S)
+    if not heading:
+        return "", False
+
+    start = heading.end()
+    stops = [page.find(marker, start) for marker in TRANSCRIPT_END_MARKERS]
+    stops = [stop for stop in stops if stop != -1]
+    end = min(stops) if stops else len(page)
+
+    body = page[start:end]
+    text = BR_RE.sub("\n", BLOCK_CLOSE_RE.sub("\n", body))
+    text = html.unescape(TAG_RE.sub("", text))
+    text = "\n".join(line.rstrip() for line in text.split("\n")).strip()
+
+    incomplete = bool(NOTICE_RE.match(text))
+    text = NOTICE_RE.sub("", text).strip()
+    return text, incomplete
+
+
 RAW_FIELDS = ("num", "title", "safe_title", "alt", "transcript", "news", "link")
 
 
@@ -392,17 +504,18 @@ def needs_image(row):
     return has_static_image(row["img_url"])
 
 
-def comic_numbers(latest_num, limit=None):
-    """Comic numbers 1..latest, excluding the nonexistent #404.
+def apply_limit(items, limit):
+    """`limit=None` means all, `limit=0` means none.
 
-    `limit` counts comics, and `limit=0` means none. A truthiness check on the
-    limit would turn `--limit 0` into a full corpus fetch, which is exactly what
-    it did before this function existed.
+    A truthiness check here is how `--limit 0` once started a full corpus fetch.
     """
-    numbers = [n for n in range(1, latest_num + 1) if n != 404]
-    if limit is not None:
-        numbers = numbers[:limit]
-    return numbers
+    items = list(items)
+    return items if limit is None else items[:limit]
+
+
+def comic_numbers(latest_num, limit=None):
+    """Comic numbers 1..latest, excluding the nonexistent #404."""
+    return apply_limit((n for n in range(1, latest_num + 1) if n != 404), limit)
 
 
 def cmd_fetch(args):
@@ -469,16 +582,134 @@ def cmd_fetch(args):
     return 1 if failures else 0
 
 
+def pending_explain_numbers(db, limit=None):
+    """Comics with no transcript from xkcd and no explainxkcd fetch recorded.
+
+    Reads the raw `transcript` column rather than the derived `has_transcript`,
+    because that derived field is NULL until `analyze` runs and the documented
+    rebuild order is fetch, fetch-explain, analyze. Filtering on it made this
+    silently return nothing on a fresh rebuild.
+
+    `explain_fetched_at` is the marker for the second half, not the presence of
+    text, so a page that legitimately has no Transcript section is not retried
+    forever.
+    """
+    numbers = [
+        row[0]
+        for row in db.execute(
+            "SELECT num FROM comics WHERE TRIM(COALESCE(transcript, '')) = ''"
+            " AND explain_fetched_at IS NULL ORDER BY num"
+        )
+    ]
+    return apply_limit(numbers, limit)
+
+
+def store_explain(db, num, text, incomplete):
+    """Record a fetch attempt. `text` may be empty, which still counts as done."""
+    db.execute(
+        "UPDATE comics SET explain_transcript = ?, explain_fetched_at = ?,"
+        " explain_incomplete = ? WHERE num = ?",
+        (text, time.strftime("%Y-%m-%dT%H:%M:%S"), 1 if incomplete else 0, num),
+    )
+    db.commit()
+
+
+def store_explain_page(db, num, page):
+    """Extract and store one page's transcript.
+
+    Returns (text, incomplete), or None when the extraction contained leaked
+    Talk-page markup, in which case nothing is stored.
+
+    `cmd_fetch_explain` calls this rather than repeating the guard inline, so the
+    leak check that tests exercise is the one the command actually runs.
+    """
+    text, incomplete = extract_transcript(page)
+    if has_leaked_markup(text):
+        return None
+    store_explain(db, num, text, incomplete)
+    return text, incomplete
+
+
+def cmd_fetch_explain(args):
+    db = connect()
+    init_db(db)
+
+    pending = pending_explain_numbers(db, args.limit)
+    fetched = empty = failed = leaked = incomplete = 0
+    failures = []
+
+    for index, num in enumerate(pending, 1):
+        try:
+            page = fetch_explain_html(num)
+        except Exception as exc:
+            failures.append((num, f"fetch: {type(exc).__name__}"))
+            failed += 1
+            time.sleep(args.delay)
+            continue
+
+        result = store_explain_page(db, num, page)
+        if result is None:
+            failures.append((num, "leaked markup, not stored"))
+            leaked += 1
+        else:
+            text, is_incomplete = result
+            if text.strip():
+                fetched += 1
+                if is_incomplete:
+                    incomplete += 1
+            else:
+                empty += 1
+
+        if index % 50 == 0:
+            print(f"  {index}/{len(pending)}  stored={fetched} empty={empty}"
+                  f" failed={len(failures)}")
+        time.sleep(args.delay)
+
+    print(
+        f"\nstored {fetched} ({incomplete} flagged incomplete), {empty} empty, "
+        f"{len(failures)} failed"
+    )
+    for num, why in failures[:40]:
+        print(f"  #{num}: {why}")
+    if failures:
+        print(f"  ... {len(failures)} total failures")
+    return 1 if failures else 0
+
+
+# explainxkcd writes a line-standing scene as [scene]; xkcd uses [[scene]].
+STANDING_SINGLE_RE = re.compile(r"(?m)^[ \t]*\[(?!\[)([^\[\]]*)\][ \t]*$")
+
+
+def normalise_blocks(text):
+    """Rewrite explainxkcd's line-standing [scene] to xkcd's [[scene]].
+
+    Applied only to text from explainxkcd, so scene_blocks() and its tests stay
+    unchanged and the line-standing rule keeps one definition.
+    """
+    return STANDING_SINGLE_RE.sub(lambda m: f"[[{m.group(1)}]]", text or "")
+
+
+def coalesced_text(row):
+    """(text, source) for a comic. Official xkcd text wins; explainxkcd is the
+    fallback. The two sources are never merged into one string."""
+    if (row["transcript"] or "").strip():
+        return row["transcript"], "official"
+    explain = (row["explain_transcript"] or "").strip()
+    if explain:
+        return normalise_blocks(explain), "explainxkcd"
+    return "", "none"
+
+
 def analyze_row(row):
-    """Derived fields for one comic. Text fields are None when there is no
-    transcript, never 0, so corpus averages cannot be pulled toward zero."""
-    transcript = row["transcript"] or ""
-    has_transcript = 1 if transcript.strip() else 0
+    """Derived fields for one comic, from whichever transcript source exists.
+    Text fields are None when there is no source, never 0."""
+    text, source = coalesced_text(row)
+    has_transcript = 1 if text.strip() else 0
 
     if has_transcript:
-        scene = len(scene_blocks(transcript))
-        dialogue = dialogue_lines(transcript)
-        speaker_json = json.dumps(speakers(transcript))
+        scene = len(scene_blocks(text))
+        dialogue = dialogue_lines(text)
+        speaker_json = json.dumps(speakers(text))
     else:
         scene = dialogue = speaker_json = None
 
@@ -493,15 +724,25 @@ def analyze_row(row):
         "is_interactive": 1 if is_interactive(row["num"], row["img_url"]) else 0,
         "title_len": len(title),
         "alt_len": len(alt),
+        "transcript_source": source,
     }
 
 
 def rebuild_fts(db):
-    """Rebuild the search index from the comics table."""
+    """Rebuild the search index from whichever transcript source each row has.
+
+    Reading comics.transcript directly would leave explainxkcd-only rows
+    unsearchable, since their transcript column is empty by design.
+    """
     db.execute("DELETE FROM comics_fts")
-    db.execute(
-        "INSERT INTO comics_fts (num, title, alt, transcript)"
-        " SELECT num, title, alt, transcript FROM comics"
+    db.executemany(
+        "INSERT INTO comics_fts (num, title, alt, transcript) VALUES (?, ?, ?, ?)",
+        (
+            (row["num"], row["title"], row["alt"] or "", coalesced_text(row)[0])
+            for row in db.execute(
+                "SELECT num, title, alt, transcript, explain_transcript FROM comics"
+            )
+        ),
     )
     db.commit()
 
@@ -510,7 +751,8 @@ def run_analyze(db):
     """Recompute every derived field and rebuild the index. Idempotent.
     Returns the number of comics analysed."""
     rows = db.execute(
-        "SELECT num, title, alt, transcript, img_url FROM comics ORDER BY num"
+        "SELECT num, title, alt, transcript, explain_transcript, img_url"
+        " FROM comics ORDER BY num"
     ).fetchall()
 
     db.executemany(
@@ -522,14 +764,15 @@ def run_analyze(db):
             has_transcript = :has_transcript,
             is_interactive = :is_interactive,
             title_len = :title_len,
-            alt_len = :alt_len
+            alt_len = :alt_len,
+            transcript_source = :transcript_source
         WHERE num = :num
         """,
         [analyze_row(row) for row in rows],
     )
     rebuild_fts(db)
 
-    with_transcript = sum(1 for r in rows if (r["transcript"] or "").strip())
+    with_transcript = sum(1 for row in rows if coalesced_text(row)[0].strip())
     print(
         f"analyzed {len(rows)} comics: {with_transcript} with a transcript, "
         f"{len(rows) - with_transcript} without"
@@ -570,10 +813,26 @@ def corpus_stats(db, top=15):
         )
     ]
 
-    speaker_counts = collections.Counter()
-    for row in db.execute("SELECT speakers FROM comics WHERE speakers IS NOT NULL"):
-        for name in json.loads(row[0]):
-            speaker_counts[name] += 1
+    # Split by source, never pooled: the two use different naming conventions,
+    # so adding Man and Megan together would describe neither.
+    speakers_by_source = {
+        "official": collections.Counter(),
+        "explainxkcd": collections.Counter(),
+    }
+    for row in db.execute(
+        "SELECT speakers, transcript_source FROM comics WHERE speakers IS NOT NULL"
+    ):
+        bucket = speakers_by_source.get(row["transcript_source"])
+        if bucket is None:
+            continue
+        for name in json.loads(row["speakers"]):
+            bucket[name] += 1
+
+    transcript_sources = {"official": 0, "explainxkcd": 0, "none": 0}
+    for row in db.execute(
+        "SELECT COALESCE(transcript_source, 'none') s, COUNT(*) c FROM comics GROUP BY s"
+    ):
+        transcript_sources[row["s"]] = row["c"]
 
     topic_counts = {}
     for topic in SYNONYMS:
@@ -594,7 +853,14 @@ def corpus_stats(db, top=15):
         "scene_blocks_over": len(scene_values),
         "scene_blocks": _percentiles(scene_values),
         "scene_blocks_median": _percentiles(scene_values)["median"],
-        "top_speakers": speaker_counts.most_common(top),
+        "speakers_by_source": {
+            source: counter.most_common(top)
+            for source, counter in speakers_by_source.items()
+        },
+        "transcript_sources": transcript_sources,
+        "incomplete_count": db.execute(
+            "SELECT COUNT(*) c FROM comics WHERE explain_incomplete = 1"
+        ).fetchone()["c"],
         "topic_counts": topic_counts,
         "date_first": min(dates) if dates else None,
         "date_last": max(dates) if dates else None,
@@ -639,9 +905,20 @@ def format_stats(s):
         lines.append(
             f"  {key:<6}              {_fmt(s['title_len'][key]):>4} / {_fmt(s['alt_len'][key])}"
         )
-    lines += ["", f"top speakers (of {s['with_transcript']} transcripts)"]
-    for name, count in s["top_speakers"]:
-        lines.append(f"  {count:>5}  {name}")
+    lines += ["", "transcript sources"]
+    for source in ("official", "explainxkcd", "none"):
+        lines.append(f"  {source:<12}         {s['transcript_sources'][source]}")
+    if s["incomplete_count"]:
+        lines.append(f"  flagged incomplete   {s['incomplete_count']}")
+    # Printed separately and never summed: the two sources name characters
+    # differently, so a combined list would describe neither convention.
+    for source in ("official", "explainxkcd"):
+        entries = s["speakers_by_source"][source]
+        if not entries:
+            continue
+        lines += ["", f"top speakers ({source})"]
+        for name, count in entries:
+            lines.append(f"  {count:>5}  {name}")
     lines += ["", "topics"]
     for topic, count in sorted(s["topic_counts"].items(), key=lambda kv: -kv[1]):
         lines.append(f"  {count:>5}  {topic}")
@@ -698,7 +975,10 @@ def format_pack(db, topic, rows):
         lines.append(f"## Exemplars ({len(rows)})")
         lines.append("")
         for row in rows:
-            lines.append(f"### #{row['num']} {row['title']} ({row['date']})")
+            source = row["transcript_source"] or "none"
+            lines.append(
+                f"### #{row['num']} {row['title']} ({row['date']}) [{source}]"
+            )
             lines.append(f"Title: {row['title']}")
             lines.append(f"Alt: {row['alt']}")
             transcript = (row["transcript"] or "").strip()
@@ -711,9 +991,15 @@ def format_pack(db, topic, rows):
                 lines.append("Transcript: none (title and alt only)")
             lines.append("")
 
-    lines.append("## Speakers in the corpus")
-    lines.append(", ".join(name for name, _ in stats["top_speakers"]))
-    lines.append("")
+    # Split by source for the same reason stats is: the two conventions name
+    # characters differently. Source labels on each exemplar come next.
+    for source in ("official", "explainxkcd"):
+        entries = stats["speakers_by_source"][source]
+        if not entries:
+            continue
+        lines.append(f"## Speakers in {source} transcripts")
+        lines.append(", ".join(name for name, _ in entries))
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -723,6 +1009,19 @@ def cmd_pack(args):
     rows = retrieve(db, args.topic, n=args.n)
     print(format_pack(db, args.topic, rows))
     return 0
+
+
+def find_leaked_transcripts(db):
+    """Comic numbers whose stored explainxkcd text contains Talk-page markup.
+
+    Twelve probes cannot prove the extractor across 1636 pages, so this runs as
+    a check over the whole corpus after every fetch.
+    """
+    return [
+        row["num"]
+        for row in db.execute("SELECT num, explain_transcript FROM comics")
+        if has_leaked_markup(row["explain_transcript"])
+    ]
 
 
 def run_selftest(db):
@@ -750,14 +1049,19 @@ def run_selftest(db):
     check("#404 absent",
           db.execute("SELECT COUNT(*) c FROM comics WHERE num = 404").fetchone()["c"], 0)
 
-    with_transcript = db.execute(
-        "SELECT COUNT(*) c FROM comics WHERE has_transcript = 1").fetchone()["c"]
-    check("comics with a transcript", with_transcript, 1665)
-    check("comics without a transcript", total - with_transcript, 1636)
+    # These pin the official corpus, the part xkcd itself published. The
+    # has_transcript field now also counts explainxkcd rows, so a pin on it
+    # would be a moving target and would stop describing the original fact.
+    official = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE transcript_source = 'official'"
+    ).fetchone()["c"]
+    check("comics with an official transcript", official, 1665)
     check("total comics", total, 3301)
 
-    check("all transcripts are #1..#1677",
-          db.execute("SELECT MAX(num) m FROM comics WHERE has_transcript = 1").fetchone()["m"],
+    check("all official transcripts are #1..#1677",
+          db.execute(
+              "SELECT MAX(num) m FROM comics WHERE transcript_source = 'official'"
+          ).fetchone()["m"],
           1677)
 
     nulls = db.execute(
@@ -783,6 +1087,22 @@ def run_selftest(db):
     ).fetchone()["c"]
     check("no zero-byte images recorded", bad_images, 0)
 
+    check("no Talk-page markup leaked into any transcript",
+          find_leaked_transcripts(db), [])
+
+    unsourced = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE COALESCE(transcript_source, 'none') = 'none'"
+    ).fetchone()["c"]
+    # 1 is the measured figure: #3283's explainxkcd Transcript section contains
+    # only the wiki's "help us write this transcript" notice, so it has no text
+    # from either source. Raise this if a fetch or parse regression makes more.
+    check("comics with no transcript from either source", unsourced, 1)
+
+    missing_blocks = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE has_transcript = 1 AND scene_blocks IS NULL"
+    ).fetchone()["c"]
+    check("every sourced transcript has scene-block data", missing_blocks, 0)
+
     failed = 0
     for label, ok, got, want in checks:
         print(f"  {'ok  ' if ok else 'FAIL'} {label}")
@@ -791,7 +1111,11 @@ def run_selftest(db):
             print(f"       got  {got!r}")
             print(f"       want {want!r}")
 
-    print(f"\n{len(checks) - failed}/{len(checks)} checks passed")
+    incomplete = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE explain_incomplete = 1"
+    ).fetchone()["c"]
+    print(f"\nflagged incomplete by explainxkcd: {incomplete}")
+    print(f"{len(checks) - failed}/{len(checks)} checks passed")
     return 1 if failed else 0
 
 
@@ -813,6 +1137,15 @@ def build_parser():
     fetch.add_argument("--delay", type=float, default=0.15,
                        help="seconds to wait between requests")
 
+    explain = sub.add_parser(
+        "fetch-explain",
+        help="fetch transcripts from explainxkcd for comics that lack one",
+    )
+    explain.add_argument("--limit", type=int, default=None,
+                         help="stop after this many comics (for testing)")
+    explain.add_argument("--delay", type=float, default=1.0,
+                         help="seconds between requests; robots.txt asks for 1")
+
     sub.add_parser("analyze", help="compute derived text fields")
 
     stats = sub.add_parser("stats", help="print corpus statistics")
@@ -828,9 +1161,19 @@ def build_parser():
     return parser
 
 
+def resolve_handler(command):
+    """The handler for a subcommand name, or None.
+
+    argparse reports a hyphenated subcommand as `fetch-explain`, and
+    `"cmd_" + "fetch-explain"` is not a Python identifier, so the lookup used to
+    return None and the command exited 2 without ever running.
+    """
+    return globals().get("cmd_" + (command or "").replace("-", "_"))
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    handler = globals().get("cmd_" + args.command)
+    handler = resolve_handler(args.command)
     if handler is None:
         print(f"error: '{args.command}' is not implemented", file=sys.stderr)
         return 2

@@ -374,11 +374,80 @@ def test_needs_image_false_when_the_comic_has_no_static_image():
 ROW_WITH_TRANSCRIPT = {
     "num": 1, "title": "Barrel - Part 1", "alt": "Don't we all.",
     "transcript": COMIC_1, "img_url": "https://imgs.xkcd.com/comics/barrel_cropped_(1).jpg",
+    "explain_transcript": None,
 }
 ROW_WITHOUT_TRANSCRIPT = {
     "num": 2198, "title": "Throw", "alt": "this calculator implements...",
     "transcript": "", "img_url": "https://imgs.xkcd.com/comics/throw.png",
+    "explain_transcript": None,
 }
+ROW_EXPLAIN_ONLY = {
+    "num": 1700, "title": "New Bug", "alt": "some alt",
+    "transcript": "", "img_url": "https://imgs.xkcd.com/comics/new_bug.png",
+    "explain_transcript": "[Megan is standing in front of a chart.]\n"
+                         "Megan: Only two instruments remain.\n"
+                         "Cueball: Which one do we lose?",
+}
+
+
+def test_normalise_blocks_converts_line_standing_single_brackets():
+    assert xkcd.normalise_blocks("[a scene]\nMan: hi") == "[[a scene]]\nMan: hi"
+
+
+def test_normalise_blocks_leaves_inline_and_double_brackets_alone():
+    assert xkcd.normalise_blocks("Man: [[inline]] yes") == "Man: [[inline]] yes"
+    assert xkcd.normalise_blocks("[[already]]") == "[[already]]"
+    assert xkcd.normalise_blocks("Girl: [not a scene] inline") == "Girl: [not a scene] inline"
+
+
+def test_coalesced_text_prefers_the_official_transcript():
+    text, source = xkcd.coalesced_text(ROW_WITH_TRANSCRIPT)
+    assert source == "official"
+    assert "barrel" in text
+    assert "Megan" not in text
+
+
+def test_coalesced_text_falls_back_to_explainxkcd_and_normalises():
+    text, source = xkcd.coalesced_text(ROW_EXPLAIN_ONLY)
+    assert source == "explainxkcd"
+    assert text.splitlines()[0] == "[[Megan is standing in front of a chart.]]"
+
+
+def test_coalesced_text_reports_none_when_neither_exists():
+    text, source = xkcd.coalesced_text(ROW_WITHOUT_TRANSCRIPT)
+    assert text == ""
+    assert source == "none"
+
+
+def test_analyze_row_derives_features_from_an_explainxkcd_transcript():
+    got = xkcd.analyze_row(ROW_EXPLAIN_ONLY)
+    assert got["transcript_source"] == "explainxkcd"
+    assert got["has_transcript"] == 1
+    assert got["scene_blocks"] == 1
+    assert got["dialogue_lines"] == 2
+    assert json.loads(got["speakers"]) == ["Megan", "Cueball"]
+
+
+def test_analyze_row_records_official_as_the_source():
+    assert xkcd.analyze_row(ROW_WITH_TRANSCRIPT)["transcript_source"] == "official"
+
+
+def test_analyze_row_records_none_and_nulls_when_no_source_exists():
+    got = xkcd.analyze_row(ROW_WITHOUT_TRANSCRIPT)
+    assert got["transcript_source"] == "none"
+    assert got["scene_blocks"] is None
+
+
+def test_run_analyze_covers_a_comic_with_only_an_explainxkcd_transcript():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", False)
+    xkcd.run_analyze(db)
+    row = db.execute("SELECT * FROM comics WHERE num = 2").fetchone()
+    assert row["transcript_source"] == "explainxkcd"
+    assert row["scene_blocks"] == 1
+    assert db.execute(
+        'SELECT COUNT(*) c FROM comics_fts WHERE comics_fts MATCH \'"scene"\''
+    ).fetchone()["c"] == 1
 
 
 def test_analyze_row_computes_text_features():
@@ -472,9 +541,39 @@ def test_corpus_stats_scopes_transcript_metrics():
     assert s["non_transcript_rows"] == 2
 
 
-def test_corpus_stats_top_speakers_ignores_transcript_less_rows():
+def test_corpus_stats_counts_each_transcript_source():
     s = xkcd.corpus_stats(seeded_db())
-    assert s["top_speakers"][0] == ("Boy", 1)
+    assert s["transcript_sources"]["official"] == 1
+    assert s["transcript_sources"]["explainxkcd"] == 0
+    assert s["transcript_sources"]["none"] == 2
+
+
+def test_corpus_stats_never_pools_speakers_across_sources():
+    """The spec's rule: Man (official) and Megan (explainxkcd) are different
+    conventions and must not be added together."""
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", False)
+    xkcd.run_analyze(db)
+    s = xkcd.corpus_stats(db)
+    assert s["speakers_by_source"]["official"][0] == ("Boy", 1)
+    assert ("Boy", 1) not in s["speakers_by_source"]["explainxkcd"]
+    assert "top_speakers" not in s
+
+
+def test_corpus_stats_reports_the_incomplete_count():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", True)
+    xkcd.run_analyze(db)
+    assert xkcd.corpus_stats(db)["incomplete_count"] == 1
+
+
+def test_format_stats_prints_the_sources_separately():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", False)
+    xkcd.run_analyze(db)
+    text = xkcd.format_stats(xkcd.corpus_stats(db))
+    assert "official" in text
+    assert "explainxkcd" in text
 
 
 def test_corpus_stats_counts_topics_from_the_synonym_map():
@@ -571,6 +670,304 @@ def test_comic_numbers_limit_zero_means_nothing():
 def test_comic_numbers_skips_404():
     assert 404 not in xkcd.comic_numbers(405)
     assert xkcd.comic_numbers(405, 405) == [n for n in range(1, 406) if n != 404]
+
+
+def columns(db, table="comics"):
+    return {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+
+
+def test_init_db_creates_the_new_explainxkcd_columns():
+    cols = columns(tmpdb())
+    for name in ("explain_transcript", "explain_fetched_at", "explain_incomplete",
+                 "transcript_source"):
+        assert name in cols, name
+
+
+def test_migrate_adds_columns_to_an_existing_table():
+    """Review Focus 1: CREATE TABLE IF NOT EXISTS does not add columns."""
+    db = tmpdb()
+    db.execute("ALTER TABLE comics DROP COLUMN explain_transcript")
+    db.commit()
+    assert "explain_transcript" not in columns(db)
+
+    xkcd.migrate(db)
+
+    assert "explain_transcript" in columns(db)
+
+
+def test_migrate_preserves_existing_rows():
+    """An already-built corpus upgrades in place; nothing is re-fetched."""
+    db = tmpdb()
+    xkcd.upsert_comic(db, PAYLOAD_1)
+    xkcd.migrate(db)
+    assert db.execute("SELECT COUNT(*) c FROM comics").fetchone()["c"] == 1
+    assert db.execute("SELECT title FROM comics").fetchone()["title"] == "Barrel - Part 1"
+
+
+def test_migrate_is_idempotent():
+    db = tmpdb()
+    xkcd.migrate(db)
+    xkcd.migrate(db)
+    assert "explain_transcript" in columns(db)
+
+
+# Mirrors the real page structure: the Transcript section, then the Talk section
+# inlined after a clear-float div. The leak markers are the ones present on the
+# live pages. Small and synthetic rather than copied wiki text, which also keeps
+# CC BY-SA content out of this repository.
+EXPLAIN_PAGE = """<html><body>
+<h2><span class="mw-headline" id="Transcript">Transcript</span>\
+<span class="mw-editsection">[edit]</span></h2>
+<dl><dd>[Megan is standing in front of a chart.]</dd>\
+<dd>Megan: Only two instruments remain.</dd></dl>
+<p><br></p><div style="clear: both"></div><p><span id="discussion"></span>\
+<b>Add comment</b> &nbsp; Create topic (use sparingly)</p>
+<h1><span class="mw-headline" id="Discussion">Discussion</span></h1>
+<p>I think the chart is wrong.</p>
+<div>Retrieved from "https://www.explainxkcd.com/wiki/index.php/3302"</div>
+<div id="catlinks"><p class="catlinks">Category: Comics</p></div>
+</body></html>"""
+
+EXPLAIN_PAGE_INCOMPLETE = """<html><body>
+<h2><span class="mw-headline" id="Transcript">Transcript</span></h2>
+This is one of 36 incomplete transcripts:
+Don't remove this notice too soon. You can help by editing the transcript!
+<dl><dd>[Megan is standing in front of a chart.]</dd>\
+<dd>Megan: Only two instruments remain.</dd></dl>
+<p><br></p><div style="clear: both"></div>
+<h1><span class="mw-headline" id="Discussion">Discussion</span></h1>
+<p>Retrieved from "https://www.explainxkcd.com/wiki/index.php/3302"</p>
+</body></html>"""
+
+EXPLAIN_PAGE_NO_SECTION = """<html><body>
+<h2><span class="mw-headline" id="Explanation">Explanation</span></h2>
+<p>Some prose about the comic.</p>
+</body></html>"""
+
+
+def test_extract_transcript_returns_the_section_text():
+    text, incomplete = xkcd.extract_transcript(EXPLAIN_PAGE)
+    assert "[Megan is standing in front of a chart.]" in text
+    assert "Megan: Only two instruments remain." in text
+    assert incomplete is False
+
+
+def test_extract_transcript_does_not_leak_the_talk_section():
+    """Review Focus 2: the bug that returned 16507 chars for #1700."""
+    text, _ = xkcd.extract_transcript(EXPLAIN_PAGE)
+    assert xkcd.has_leaked_markup(text) is False
+    for marker in ("Add comment", "Create topic", "Retrieved from", "Category:"):
+        assert marker not in text, marker
+
+
+def test_extract_transcript_strips_the_incomplete_notice_and_flags_it():
+    text, incomplete = xkcd.extract_transcript(EXPLAIN_PAGE_INCOMPLETE)
+    assert incomplete is True
+    assert "incomplete transcript" not in text.lower()
+    assert "Don't remove this notice" not in text
+    assert "[Megan is standing in front of a chart.]" in text
+
+
+def test_extract_transcript_returns_empty_when_there_is_no_section():
+    """Review Focus 3, at the parsing level."""
+    assert xkcd.extract_transcript(EXPLAIN_PAGE_NO_SECTION) == ("", False)
+    assert xkcd.extract_transcript("") == ("", False)
+
+
+def test_extract_transcript_unescapes_entities_and_drops_tags():
+    page = ('<h2><span class="mw-headline" id="Transcript">Transcript</span></h2>'
+            '<dl><dd>[A &amp; B &lt;tag&gt;]</dd></dl>'
+            '<div style="clear: both"></div>')
+    text, _ = xkcd.extract_transcript(page)
+    assert text == "[A & B <tag>]"
+
+
+def test_has_leaked_markup_detects_each_marker():
+    for marker in xkcd.LEAK_MARKERS:
+        assert xkcd.has_leaked_markup(f"line one\n{marker}\nline two") is True
+    assert xkcd.has_leaked_markup("[clean scene]\nMan: hello") is False
+
+
+def test_fetch_explain_html_uses_the_seam():
+    calls = {}
+
+    def fake(url, timeout):
+        calls["url"] = url
+        return EXPLAIN_PAGE
+
+    original = xkcd._get_html
+    xkcd._get_html = fake
+    try:
+        page = xkcd.fetch_explain_html(3302)
+    finally:
+        xkcd._get_html = original
+    assert calls["url"] == "https://www.explainxkcd.com/wiki/index.php/3302"
+    assert "Transcript" in page
+
+
+def test_apply_limit_zero_means_none():
+    """Review Focus 5: the same falsy-zero bug --limit 0 hit in `fetch`."""
+    assert xkcd.apply_limit([1, 2, 3], 0) == []
+    assert xkcd.apply_limit([1, 2, 3], None) == [1, 2, 3]
+    assert xkcd.apply_limit([1, 2, 3], 2) == [1, 2]
+
+
+def test_comic_numbers_still_honours_zero_after_delegating():
+    assert xkcd.comic_numbers(10, 0) == []
+    assert xkcd.comic_numbers(5, None) == [1, 2, 3, 4, 5]
+
+
+def test_pending_explain_numbers_only_lists_comics_without_one():
+    assert xkcd.pending_explain_numbers(seeded_db()) == [2, 3]
+
+
+def test_pending_explain_numbers_skips_already_fetched_rows():
+    """Review Focus 4: a rerun must not re-fetch what it already has."""
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]", False)
+    assert xkcd.pending_explain_numbers(db) == [3]
+
+
+def test_pending_explain_numbers_retries_rows_that_never_succeeded():
+    db = seeded_db()
+    assert xkcd.pending_explain_numbers(db) == [2, 3]
+
+
+def test_pending_explain_numbers_honours_limit_zero():
+    assert xkcd.pending_explain_numbers(seeded_db(), 0) == []
+
+
+def test_store_explain_records_text_and_marks_it_fetched():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]", False)
+    row = db.execute("SELECT * FROM comics WHERE num = 2").fetchone()
+    assert row["explain_transcript"] == "[a scene]"
+    assert row["explain_incomplete"] == 0
+    assert row["explain_fetched_at"]
+
+
+def test_store_explain_marks_an_empty_page_as_fetched():
+    """Review Focus 3: an empty page is fetched-and-empty, not retried forever."""
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "", False)
+    row = db.execute("SELECT * FROM comics WHERE num = 2").fetchone()
+    assert row["explain_transcript"] == ""
+    assert row["explain_fetched_at"]
+    assert xkcd.pending_explain_numbers(db) == [3]
+
+
+def test_store_explain_records_the_incomplete_flag():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]", True)
+    assert db.execute("SELECT explain_incomplete FROM comics WHERE num = 2").fetchone()[0] == 1
+
+
+def test_resolve_handler_normalises_hyphenated_commands():
+    """`fetch-explain` resolved to `cmd_fetch-explain`, which is not a Python
+    identifier, so the lookup returned None and the command exited 2."""
+    for command in ("fetch", "fetch-explain", "analyze", "stats", "pack", "selftest"):
+        assert callable(xkcd.resolve_handler(command)), command
+
+
+def test_resolve_handler_returns_none_for_an_unknown_command():
+    assert xkcd.resolve_handler("definitely-not-a-command") is None
+
+
+def test_format_pack_labels_each_exemplar_with_its_source():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", False)
+    xkcd.run_analyze(db)
+    text = xkcd.format_pack(db, "scene", xkcd.retrieve(db, "scene"))
+    assert "[explainxkcd]" in text
+
+
+def test_format_pack_labels_official_exemplars():
+    db = seeded_db()
+    text = xkcd.format_pack(db, "barrel", xkcd.retrieve(db, "barrel"))
+    assert "[official]" in text
+
+
+def test_format_pack_separates_the_two_speaker_lists():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", False)
+    xkcd.run_analyze(db)
+    text = xkcd.format_pack(db, "barrel", xkcd.retrieve(db, "barrel"))
+    assert "Speakers in official transcripts" in text
+    assert "Speakers in explainxkcd transcripts" in text
+
+
+def test_find_leaked_transcripts_flags_only_the_leaking_row():
+    """Review Focus 2, asserted precisely rather than through an exit code.
+
+    run_selftest returns 1 for several unrelated reasons on a three-comic
+    fixture, including the pinned 1665 transcript count, so asserting on its
+    exit code would pass whether or not this check exists.
+    """
+    db = seeded_db()
+    db.execute("UPDATE comics SET explain_transcript = 'Add comment',"
+               " explain_fetched_at = 'now' WHERE num = 2")
+    db.commit()
+    assert xkcd.find_leaked_transcripts(db) == [2]
+
+
+def test_leak_detector_does_not_flag_comic_content_about_a_privacy_policy():
+    """#1998's panel text IS a privacy policy notice, so the phrase is content
+    here. A marker broad enough to appear in a comic is not a marker."""
+    text = ("[The picture shows a long text:]\n\nPrivacy policy\n\n"
+            "We've updated our privacy policy. This is purely a formality.")
+    assert xkcd.has_leaked_markup(text) is False
+
+
+def test_find_leaked_transcripts_is_empty_on_clean_data():
+    assert xkcd.find_leaked_transcripts(seeded_db()) == []
+
+
+def test_pending_explain_numbers_works_before_analyze_has_run():
+    """Critical: the documented rebuild order is fetch, fetch-explain, analyze.
+
+    has_transcript is NULL until analyze runs, so filtering on it made
+    fetch-explain silently fetch nothing on a fresh rebuild.
+    """
+    db = tmpdb()
+    db.execute("INSERT INTO comics (num, title, transcript, img_url)"
+               " VALUES (1, 'A', '[[a scene]]', 'x')")
+    db.execute("INSERT INTO comics (num, title, transcript, img_url)"
+               " VALUES (2, 'B', '', 'x')")
+    db.commit()
+    assert [r[0] for r in db.execute("SELECT has_transcript FROM comics")] == [None, None]
+    assert xkcd.pending_explain_numbers(db) == [2]
+
+
+def test_normalise_blocks_does_not_span_two_bracket_groups():
+    """The inner group must not contain a bracket, or the pattern swallows
+    everything between the first and last bracket on the line."""
+    assert xkcd.normalise_blocks("[a] [b]") == "[a] [b]"
+    assert xkcd.normalise_blocks("[a] then [b]") == "[a] then [b]"
+
+
+def test_cmd_fetch_explain_uses_the_tested_leak_guard_seam():
+    """The guard is tested through store_explain_page, so the command must call
+    it rather than keeping a parallel copy that no test covers."""
+    import inspect
+    source = inspect.getsource(xkcd.cmd_fetch_explain)
+    assert "store_explain_page" in source
+    assert source.count("has_leaked_markup") == 0
+
+
+def test_store_explain_page_returns_none_when_it_refuses_to_store():
+    db = seeded_db()
+    page = ('<h2><span class="mw-headline" id="Transcript">Transcript</span></h2>'
+            '<dl><dd>[a scene]</dd></dl><p><b>Add comment</b></p>')
+    assert xkcd.store_explain_page(db, 3, page) is None
+    assert not db.execute("SELECT explain_fetched_at FROM comics WHERE num = 3").fetchone()[0]
+
+
+def test_store_explain_page_returns_the_text_when_it_stores():
+    db = seeded_db()
+    page = ('<h2><span class="mw-headline" id="Transcript">Transcript</span></h2>'
+            '<dl><dd>[a scene]</dd></dl><div style="clear: both"></div>')
+    # Raw text, not normalised: normalisation belongs to coalesced_text.
+    assert xkcd.store_explain_page(db, 3, page) == ("[a scene]", False)
 
 
 def _run():

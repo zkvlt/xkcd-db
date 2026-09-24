@@ -2,14 +2,14 @@ comics                 3301
 date range             2006-01-01 .. 2026-09-23
 
 transcript coverage (the rest have title and alt only)
-  with a transcript    1665
-  without              1636
+  with a transcript    3300
+  without              1
 
-scene blocks (over the 1665 transcripts)
+scene blocks (over the 3300 transcripts)
   min                 0
-  median              1
-  p90                 5
-  max                 86
+  median              2
+  p90                 6
+  max                 189
 
 title / alt length
   min                    1 / 0
@@ -17,7 +17,13 @@ title / alt length
   p90                   22 / 209
   max                   53 / 816
 
-top speakers (of 1665 transcripts)
+transcript sources
+  official             1665
+  explainxkcd          1635
+  none                 1
+  flagged incomplete   27
+
+top speakers (official)
     231  Man
     201  Woman
      82  Person 1
@@ -38,41 +44,58 @@ top speakers (of 1665 transcripts)
      15  Character
      14  Student
      12  Black hat guy
-     11  Phone
-     11  Beret guy
-     10  Hat guy
-     10  Figure 1
-     10  Teacher
+
+top speakers (explainxkcd)
+    606  Cueball
+    274  Megan
+    220  Ponytail
+    105  White Hat
+     59  Hairy
+     47  Miss Lenhart
+     46  Black Hat
+     37  Off-panel voice
+     34  Hairbun
+     29  Beret Guy
+     21  Label
+     18  Caption
+     12  Phone
+     11  Sign
+     11  X-axis
+     10  My hobby
+     10  Y-axis
+     10  Jill
+     10  Laptop
+      8  Computer
 
 topics
-    381  computers
-    314  work
-    254  meta
-    252  space
-    177  internet
-    148  physics
-    144  statistics
-    131  romance
-    127  health
-    119  food
-    113  math
-    103  parenting
-    101  politics
-     96  social-media
-     92  maps
-     89  existential
-     88  sex
-     80  history
-     78  engineering
-     76  programming
-     72  linguistics
-     71  biology
-     55  ai
-     49  cats
-     46  time-travel
-     44  weather
-     42  chemistry
-     40  gardening
-     27  economics
-     20  climate
-     14  philosophy
+    570  computers
+    569  meta
+    544  work
+    459  space
+    272  internet
+    250  statistics
+    237  physics
+    197  romance
+    185  math
+    175  health
+    167  food
+    160  maps
+    159  politics
+    154  social-media
+    142  parenting
+    139  engineering
+    137  history
+    131  existential
+    120  biology
+    118  programming
+    103  linguistics
+    103  sex
+     94  time-travel
+     85  chemistry
+     83  gardening
+     79  ai
+     74  cats
+     70  weather
+     53  economics
+     42  climate
+     27  philosophy
