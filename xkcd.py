@@ -661,16 +661,40 @@ def cmd_fetch_explain(args):
     return 1 if failures else 0
 
 
+# explainxkcd writes a line-standing scene as [scene]; xkcd uses [[scene]].
+STANDING_SINGLE_RE = re.compile(r"(?m)^[ \t]*\[(?!\[)(.*?)\][ \t]*$")
+
+
+def normalise_blocks(text):
+    """Rewrite explainxkcd's line-standing [scene] to xkcd's [[scene]].
+
+    Applied only to text from explainxkcd, so scene_blocks() and its tests stay
+    unchanged and the line-standing rule keeps one definition.
+    """
+    return STANDING_SINGLE_RE.sub(lambda m: f"[[{m.group(1)}]]", text or "")
+
+
+def coalesced_text(row):
+    """(text, source) for a comic. Official xkcd text wins; explainxkcd is the
+    fallback. The two sources are never merged into one string."""
+    if (row["transcript"] or "").strip():
+        return row["transcript"], "official"
+    explain = (row["explain_transcript"] or "").strip()
+    if explain:
+        return normalise_blocks(explain), "explainxkcd"
+    return "", "none"
+
+
 def analyze_row(row):
-    """Derived fields for one comic. Text fields are None when there is no
-    transcript, never 0, so corpus averages cannot be pulled toward zero."""
-    transcript = row["transcript"] or ""
-    has_transcript = 1 if transcript.strip() else 0
+    """Derived fields for one comic, from whichever transcript source exists.
+    Text fields are None when there is no source, never 0."""
+    text, source = coalesced_text(row)
+    has_transcript = 1 if text.strip() else 0
 
     if has_transcript:
-        scene = len(scene_blocks(transcript))
-        dialogue = dialogue_lines(transcript)
-        speaker_json = json.dumps(speakers(transcript))
+        scene = len(scene_blocks(text))
+        dialogue = dialogue_lines(text)
+        speaker_json = json.dumps(speakers(text))
     else:
         scene = dialogue = speaker_json = None
 
@@ -685,15 +709,25 @@ def analyze_row(row):
         "is_interactive": 1 if is_interactive(row["num"], row["img_url"]) else 0,
         "title_len": len(title),
         "alt_len": len(alt),
+        "transcript_source": source,
     }
 
 
 def rebuild_fts(db):
-    """Rebuild the search index from the comics table."""
+    """Rebuild the search index from whichever transcript source each row has.
+
+    Reading comics.transcript directly would leave explainxkcd-only rows
+    unsearchable, since their transcript column is empty by design.
+    """
     db.execute("DELETE FROM comics_fts")
-    db.execute(
-        "INSERT INTO comics_fts (num, title, alt, transcript)"
-        " SELECT num, title, alt, transcript FROM comics"
+    db.executemany(
+        "INSERT INTO comics_fts (num, title, alt, transcript) VALUES (?, ?, ?, ?)",
+        (
+            (row["num"], row["title"], row["alt"] or "", coalesced_text(row)[0])
+            for row in db.execute(
+                "SELECT num, title, alt, transcript, explain_transcript FROM comics"
+            )
+        ),
     )
     db.commit()
 
@@ -702,7 +736,8 @@ def run_analyze(db):
     """Recompute every derived field and rebuild the index. Idempotent.
     Returns the number of comics analysed."""
     rows = db.execute(
-        "SELECT num, title, alt, transcript, img_url FROM comics ORDER BY num"
+        "SELECT num, title, alt, transcript, explain_transcript, img_url"
+        " FROM comics ORDER BY num"
     ).fetchall()
 
     db.executemany(
@@ -714,14 +749,15 @@ def run_analyze(db):
             has_transcript = :has_transcript,
             is_interactive = :is_interactive,
             title_len = :title_len,
-            alt_len = :alt_len
+            alt_len = :alt_len,
+            transcript_source = :transcript_source
         WHERE num = :num
         """,
         [analyze_row(row) for row in rows],
     )
     rebuild_fts(db)
 
-    with_transcript = sum(1 for r in rows if (r["transcript"] or "").strip())
+    with_transcript = sum(1 for row in rows if coalesced_text(row)[0].strip())
     print(
         f"analyzed {len(rows)} comics: {with_transcript} with a transcript, "
         f"{len(rows) - with_transcript} without"

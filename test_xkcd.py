@@ -374,11 +374,80 @@ def test_needs_image_false_when_the_comic_has_no_static_image():
 ROW_WITH_TRANSCRIPT = {
     "num": 1, "title": "Barrel - Part 1", "alt": "Don't we all.",
     "transcript": COMIC_1, "img_url": "https://imgs.xkcd.com/comics/barrel_cropped_(1).jpg",
+    "explain_transcript": None,
 }
 ROW_WITHOUT_TRANSCRIPT = {
     "num": 2198, "title": "Throw", "alt": "this calculator implements...",
     "transcript": "", "img_url": "https://imgs.xkcd.com/comics/throw.png",
+    "explain_transcript": None,
 }
+ROW_EXPLAIN_ONLY = {
+    "num": 1700, "title": "New Bug", "alt": "some alt",
+    "transcript": "", "img_url": "https://imgs.xkcd.com/comics/new_bug.png",
+    "explain_transcript": "[Megan is standing in front of a chart.]\n"
+                         "Megan: Only two instruments remain.\n"
+                         "Cueball: Which one do we lose?",
+}
+
+
+def test_normalise_blocks_converts_line_standing_single_brackets():
+    assert xkcd.normalise_blocks("[a scene]\nMan: hi") == "[[a scene]]\nMan: hi"
+
+
+def test_normalise_blocks_leaves_inline_and_double_brackets_alone():
+    assert xkcd.normalise_blocks("Man: [[inline]] yes") == "Man: [[inline]] yes"
+    assert xkcd.normalise_blocks("[[already]]") == "[[already]]"
+    assert xkcd.normalise_blocks("Girl: [not a scene] inline") == "Girl: [not a scene] inline"
+
+
+def test_coalesced_text_prefers_the_official_transcript():
+    text, source = xkcd.coalesced_text(ROW_WITH_TRANSCRIPT)
+    assert source == "official"
+    assert "barrel" in text
+    assert "Megan" not in text
+
+
+def test_coalesced_text_falls_back_to_explainxkcd_and_normalises():
+    text, source = xkcd.coalesced_text(ROW_EXPLAIN_ONLY)
+    assert source == "explainxkcd"
+    assert text.splitlines()[0] == "[[Megan is standing in front of a chart.]]"
+
+
+def test_coalesced_text_reports_none_when_neither_exists():
+    text, source = xkcd.coalesced_text(ROW_WITHOUT_TRANSCRIPT)
+    assert text == ""
+    assert source == "none"
+
+
+def test_analyze_row_derives_features_from_an_explainxkcd_transcript():
+    got = xkcd.analyze_row(ROW_EXPLAIN_ONLY)
+    assert got["transcript_source"] == "explainxkcd"
+    assert got["has_transcript"] == 1
+    assert got["scene_blocks"] == 1
+    assert got["dialogue_lines"] == 2
+    assert json.loads(got["speakers"]) == ["Megan", "Cueball"]
+
+
+def test_analyze_row_records_official_as_the_source():
+    assert xkcd.analyze_row(ROW_WITH_TRANSCRIPT)["transcript_source"] == "official"
+
+
+def test_analyze_row_records_none_and_nulls_when_no_source_exists():
+    got = xkcd.analyze_row(ROW_WITHOUT_TRANSCRIPT)
+    assert got["transcript_source"] == "none"
+    assert got["scene_blocks"] is None
+
+
+def test_run_analyze_covers_a_comic_with_only_an_explainxkcd_transcript():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", False)
+    xkcd.run_analyze(db)
+    row = db.execute("SELECT * FROM comics WHERE num = 2").fetchone()
+    assert row["transcript_source"] == "explainxkcd"
+    assert row["scene_blocks"] == 1
+    assert db.execute(
+        'SELECT COUNT(*) c FROM comics_fts WHERE comics_fts MATCH \'"scene"\''
+    ).fetchone()["c"] == 1
 
 
 def test_analyze_row_computes_text_features():
