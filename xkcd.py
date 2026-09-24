@@ -142,6 +142,94 @@ def dialogue_lines(transcript):
     return count
 
 
+# Broad subjects mapped to the words the corpus actually uses. Nothing is stored,
+# so extending this needs no re-analysis.
+SYNONYMS = {
+    "math": ["math", "maths", "equation", "theorem", "proof", "integral",
+             "derivative", "prime number", "geometry", "algebra", "fourier",
+             "infinity"],
+    "physics": ["physics", "physicist", "quantum", "relativity", "thermodynamics",
+                "momentum", "friction", "entropy", "particle"],
+    "space": ["spacecraft", "orbit", "nasa", "astronaut", "spaceship", "planet",
+              "galaxy", "telescope", "rocket"],
+    "biology": ["biology", "evolution", "genome", "dna", "species", "neuron",
+                "organism", "photosynthesis"],
+    "chemistry": ["chemistry", "chemical", "molecule", "atom", "periodic table",
+                  "acid"],
+    "programming": ["programming", "compile", "codebase", "refactor", "debug",
+                    "python", "perl", "regex", "source code"],
+    "computers": ["computer", "laptop", "hard drive", "keyboard", "browser",
+                  "database", "encryption", "password", "operating system"],
+    "ai": ["artificial intelligence", "machine learning", "neural network",
+           "chatgpt", "robot"],
+    "statistics": ["statistics", "statistical", "probability", "regression",
+                   "correlation", "sample size", "standard deviation"],
+    "engineering": ["engineer", "bridge", "gearbox", "circuit", "voltage",
+                    "turbine", "welding"],
+    "linguistics": ["linguistics", "grammar", "pronounce", "pronunciation",
+                    "spelling", "dictionary", "vowel", "syntax", "etymology"],
+    "philosophy": ["philosophy", "philosophical", "epistemology", "metaphysics",
+                   "consciousness", "thought experiment", "solipsism"],
+    "economics": ["economics", "economic", "inflation", "stock market", "taxes",
+                  "bitcoin", "cryptocurrency", "recession"],
+    "romance": ["girlfriend", "boyfriend", "dating", "romance", "romantic",
+                "married", "marriage", "wedding", "kiss", "breakup", "crush"],
+    "sex": ["sex", "sexual", "porn", "orgasm", "condom", "naked"],
+    "existential": ["existential", "meaningless", "mortality", "mortal", "dying",
+                    "death", "dead", "nihilism", "purpose of life"],
+    "time-travel": ["time travel", "time machine", "paradox", "temporal",
+                    "past self"],
+    "internet": ["the internet", "website", "email", "wifi", "download", "online"],
+    "social-media": ["facebook", "twitter", "tumblr", "instagram", "reddit",
+                     "youtube", "social media", "blog"],
+    "meta": ["webcomic", "this comic", "xkcd", "alt text", "comic strip"],
+    "history": ["history", "historical", "century", "medieval", "roman empire",
+                "world war"],
+    "maps": ["map", "maps", "geography", "continent", "globe"],
+    "food": ["food", "restaurant", "cooking", "recipe", "pizza", "coffee", "beer",
+             "breakfast", "sandwich"],
+    "health": ["doctor", "hospital", "medicine", "medical", "sleep", "exercise",
+               "disease", "cancer", "vitamin"],
+    "cats": ["cat", "kitten", "feline"],
+    "parenting": ["toddler", "parenting", "my son", "my daughter", "my kids",
+                  "baby"],
+    "work": ["boss", "meeting", "office", "coworker", "deadline", "salary",
+             "job interview"],
+    "politics": ["politics", "political", "senator", "president", "election",
+                 "congress", "voting"],
+    "climate": ["climate", "global warming", "greenhouse", "emissions", "carbon"],
+    "weather": ["weather", "tornado", "hurricane", "snowstorm", "thunderstorm"],
+    "gardening": ["garden", "gardening", "lawn", "soil", "seed", "plant"],
+}
+
+WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def expand(topic):
+    """A topic plus its synonyms, lowercased, stripped, sorted, deduplicated."""
+    base = (topic or "").strip().lower()
+    if not base:
+        return []
+    return sorted({base} | set(SYNONYMS.get(base, ())))
+
+
+def fts_query(topic):
+    """A safe FTS5 MATCH expression for a topic, or None if nothing is searchable.
+
+    Mandatory, not defensive. Measured against a live index: `gardening AND`,
+    `a "quote`, `NEAR(`, `a - b`, `OR OR`, `garden)(`, `NOT x`, and an empty
+    string all raise sqlite3.OperationalError when passed to MATCH directly.
+    Tokenising to \\w+ and quoting every word removes every operator.
+    """
+    clauses = []
+    for term in expand(topic):
+        words = WORD_RE.findall(term)
+        if words:
+            # Quoted words separated by spaces are an implicit AND in FTS5.
+            clauses.append(" ".join(f'"{w}"' for w in words))
+    return " OR ".join(clauses) or None
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="xkcd.py", description="xkcd corpus tool and writer support."

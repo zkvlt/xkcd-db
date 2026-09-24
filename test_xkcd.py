@@ -159,6 +159,61 @@ def test_empty_transcript_yields_empty_structures():
     assert xkcd.dialogue_lines("") == 0
 
 
+def test_expand_includes_the_topic_and_its_synonyms():
+    got = xkcd.expand("romance")
+    assert "romance" in got
+    assert "girlfriend" in got
+    assert "wedding" in got
+
+
+def test_expand_is_sorted_and_deduplicated():
+    assert xkcd.expand("cats") == ["cat", "cats", "feline", "kitten"]
+
+
+def test_expand_normalises_case_and_whitespace():
+    assert xkcd.expand("  Cats ") == ["cat", "cats", "feline", "kitten"]
+
+
+def test_expand_unknown_topic_returns_only_itself():
+    assert xkcd.expand("ferrofluid") == ["ferrofluid"]
+
+
+def test_fts_query_quotes_every_word():
+    assert xkcd.fts_query("a - b") == '"a" "b"'
+    assert xkcd.fts_query("NEAR(") == '"near"'
+
+
+def test_fts_query_returns_none_when_there_is_nothing_to_search():
+    assert xkcd.fts_query("") is None
+    assert xkcd.fts_query("   ") is None
+    assert xkcd.fts_query("*") is None
+
+
+def test_fts_query_never_raises_on_metacharacters():
+    """Measured: these all raise sqlite3.OperationalError against raw MATCH."""
+    db = tmpdb()
+    db.execute(
+        "INSERT INTO comics_fts (num, title, alt, transcript) VALUES (1, 'Garden', '', '')"
+    )
+    for hostile in [
+        "gardening AND", 'a "quote', "NEAR(", "a - b", "OR OR",
+        "garden)(", "NOT x", "*", "", "   ",
+    ]:
+        query = xkcd.fts_query(hostile)
+        if query is None:
+            continue
+        db.execute(
+            "SELECT num FROM comics_fts WHERE comics_fts MATCH ? LIMIT 5",
+            (query,),
+        ).fetchall()
+
+
+def test_fts_query_expands_synonyms_into_a_disjunction():
+    query = xkcd.fts_query("romance")
+    assert " OR " in query
+    assert '"girlfriend"' in query
+
+
 def _run():
     tests = [
         (n, f)
