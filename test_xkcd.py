@@ -1,4 +1,5 @@
 """Assert-based tests for xkcd.py. Run with `python3 test_xkcd.py`."""
+import json
 import sys
 import tempfile
 import traceback
@@ -368,6 +369,78 @@ def test_needs_image_false_when_already_downloaded():
 def test_needs_image_false_when_the_comic_has_no_static_image():
     row = {"img_url": "https://imgs.xkcd.com/comics/", "img_path": None}
     assert xkcd.needs_image(row) is False
+
+
+ROW_WITH_TRANSCRIPT = {
+    "num": 1, "title": "Barrel - Part 1", "alt": "Don't we all.",
+    "transcript": COMIC_1, "img_url": "https://imgs.xkcd.com/comics/barrel_cropped_(1).jpg",
+}
+ROW_WITHOUT_TRANSCRIPT = {
+    "num": 2198, "title": "Throw", "alt": "this calculator implements...",
+    "transcript": "", "img_url": "https://imgs.xkcd.com/comics/throw.png",
+}
+
+
+def test_analyze_row_computes_text_features():
+    got = xkcd.analyze_row(ROW_WITH_TRANSCRIPT)
+    assert got["scene_blocks"] == 2
+    assert got["dialogue_lines"] == 1
+    assert json.loads(got["speakers"]) == ["Boy"]
+    assert got["has_transcript"] == 1
+    assert got["title_len"] == len("Barrel - Part 1")
+    assert got["alt_len"] == len("Don't we all.")
+
+
+def test_analyze_row_nulls_every_text_field_without_a_transcript():
+    """Review Focus 1: absent must not become zero."""
+    got = xkcd.analyze_row(ROW_WITHOUT_TRANSCRIPT)
+    assert got["has_transcript"] == 0
+    assert got["scene_blocks"] is None
+    assert got["dialogue_lines"] is None
+    assert got["speakers"] is None
+    assert got["title_len"] == len("Throw")
+
+
+def test_analyze_row_zero_is_kept_when_a_transcript_has_no_scene_blocks():
+    """#300 has a transcript whose only [[...]] is inline, so 0 is correct here."""
+    row = dict(ROW_WITH_TRANSCRIPT, num=300, transcript=COMIC_300)
+    got = xkcd.analyze_row(row)
+    assert got["has_transcript"] == 1
+    assert got["scene_blocks"] == 0
+
+
+def test_analyze_row_marks_interactive_comics():
+    row = dict(ROW_WITHOUT_TRANSCRIPT, num=1663,
+               img_url="https://imgs.xkcd.com/comics/")
+    assert xkcd.analyze_row(row)["is_interactive"] == 1
+    assert xkcd.analyze_row(ROW_WITHOUT_TRANSCRIPT)["is_interactive"] == 0
+
+
+def test_run_analyze_updates_rows_and_rebuilds_fts():
+    db = tmpdb()
+    xkcd.upsert_comic(db, PAYLOAD_1)
+    xkcd.upsert_comic(db, dict(PAYLOAD_1, num=2, title="Tree", transcript="",
+                               img="https://imgs.xkcd.com/comics/tree_cropped_(1).jpg"))
+    assert xkcd.run_analyze(db) == 2
+
+    assert db.execute("SELECT scene_blocks FROM comics WHERE num = 1").fetchone()[0] == 2
+    assert db.execute("SELECT scene_blocks FROM comics WHERE num = 2").fetchone()[0] is None
+    hits = db.execute(
+        'SELECT num FROM comics_fts WHERE comics_fts MATCH \'"barrel"\''
+    ).fetchall()
+    assert [r[0] for r in hits] == [1]
+
+
+def test_run_analyze_is_idempotent():
+    """Re-running must not duplicate index rows, which DELETE-then-INSERT can do."""
+    db = tmpdb()
+    xkcd.upsert_comic(db, PAYLOAD_1)
+    xkcd.run_analyze(db)
+    first = dict(db.execute("SELECT * FROM comics WHERE num = 1").fetchone())
+    xkcd.run_analyze(db)
+    second = dict(db.execute("SELECT * FROM comics WHERE num = 1").fetchone())
+    assert first == second
+    assert db.execute("SELECT COUNT(*) c FROM comics_fts").fetchone()["c"] == 1
 
 
 def _run():

@@ -445,6 +445,81 @@ def cmd_fetch(args):
     return 1 if failures else 0
 
 
+def analyze_row(row):
+    """Derived fields for one comic. Text fields are None when there is no
+    transcript, never 0, so corpus averages cannot be pulled toward zero."""
+    transcript = row["transcript"] or ""
+    has_transcript = 1 if transcript.strip() else 0
+
+    if has_transcript:
+        scene = len(scene_blocks(transcript))
+        dialogue = dialogue_lines(transcript)
+        speaker_json = json.dumps(speakers(transcript))
+    else:
+        scene = dialogue = speaker_json = None
+
+    title = row["title"] or ""
+    alt = row["alt"] or ""
+    return {
+        "num": row["num"],
+        "scene_blocks": scene,
+        "dialogue_lines": dialogue,
+        "speakers": speaker_json,
+        "has_transcript": has_transcript,
+        "is_interactive": 1 if is_interactive(row["num"], row["img_url"]) else 0,
+        "title_len": len(title),
+        "alt_len": len(alt),
+    }
+
+
+def rebuild_fts(db):
+    """Rebuild the search index from the comics table."""
+    db.execute("DELETE FROM comics_fts")
+    db.execute(
+        "INSERT INTO comics_fts (num, title, alt, transcript)"
+        " SELECT num, title, alt, transcript FROM comics"
+    )
+    db.commit()
+
+
+def run_analyze(db):
+    """Recompute every derived field and rebuild the index. Idempotent.
+    Returns the number of comics analysed."""
+    rows = db.execute(
+        "SELECT num, title, alt, transcript, img_url FROM comics ORDER BY num"
+    ).fetchall()
+
+    db.executemany(
+        """
+        UPDATE comics SET
+            scene_blocks = :scene_blocks,
+            dialogue_lines = :dialogue_lines,
+            speakers = :speakers,
+            has_transcript = :has_transcript,
+            is_interactive = :is_interactive,
+            title_len = :title_len,
+            alt_len = :alt_len
+        WHERE num = :num
+        """,
+        [analyze_row(row) for row in rows],
+    )
+    rebuild_fts(db)
+
+    with_transcript = sum(1 for r in rows if (r["transcript"] or "").strip())
+    print(
+        f"analyzed {len(rows)} comics: {with_transcript} with a transcript, "
+        f"{len(rows) - with_transcript} without"
+    )
+    return len(rows)
+
+
+def cmd_analyze(args):
+    db = connect()
+    init_db(db)
+    run_analyze(db)
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="xkcd.py", description="xkcd corpus tool and writer support."
