@@ -884,6 +884,29 @@ def test_resolve_handler_returns_none_for_an_unknown_command():
     assert xkcd.resolve_handler("definitely-not-a-command") is None
 
 
+def test_format_pack_labels_each_exemplar_with_its_source():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", False)
+    xkcd.run_analyze(db)
+    text = xkcd.format_pack(db, "scene", xkcd.retrieve(db, "scene"))
+    assert "[explainxkcd]" in text
+
+
+def test_format_pack_labels_official_exemplars():
+    db = seeded_db()
+    text = xkcd.format_pack(db, "barrel", xkcd.retrieve(db, "barrel"))
+    assert "[official]" in text
+
+
+def test_format_pack_separates_the_two_speaker_lists():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", False)
+    xkcd.run_analyze(db)
+    text = xkcd.format_pack(db, "barrel", xkcd.retrieve(db, "barrel"))
+    assert "Speakers in official transcripts" in text
+    assert "Speakers in explainxkcd transcripts" in text
+
+
 def _run():
     tests = [
         (n, f)

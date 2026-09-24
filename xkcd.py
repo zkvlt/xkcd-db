@@ -960,7 +960,10 @@ def format_pack(db, topic, rows):
         lines.append(f"## Exemplars ({len(rows)})")
         lines.append("")
         for row in rows:
-            lines.append(f"### #{row['num']} {row['title']} ({row['date']})")
+            source = row["transcript_source"] or "none"
+            lines.append(
+                f"### #{row['num']} {row['title']} ({row['date']}) [{source}]"
+            )
             lines.append(f"Title: {row['title']}")
             lines.append(f"Alt: {row['alt']}")
             transcript = (row["transcript"] or "").strip()
