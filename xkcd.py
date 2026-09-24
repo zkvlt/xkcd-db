@@ -614,6 +614,83 @@ def cmd_stats(args):
     return 0
 
 
+EXCERPT_CHARS = 900
+
+
+def retrieve(db, topic, n=8):
+    """BM25 hits for a topic, expanded through the synonym map.
+
+    Returns [] when the topic has nothing searchable, which is a valid answer
+    rather than an error.
+    """
+    query = fts_query(topic)
+    if not query:
+        return []
+    numbers = [
+        row[0]
+        for row in db.execute(
+            "SELECT num FROM comics_fts WHERE comics_fts MATCH ? ORDER BY rank LIMIT ?",
+            (query, n),
+        )
+    ]
+    if not numbers:
+        return []
+    marks = ",".join("?" * len(numbers))
+    rows = db.execute(
+        f"SELECT * FROM comics WHERE num IN ({marks})", numbers
+    ).fetchall()
+    order = {num: index for index, num in enumerate(numbers)}
+    return sorted(rows, key=lambda row: order[row["num"]])
+
+
+def format_pack(db, topic, rows):
+    """One evidence block: exemplars, the speaker roster, and corpus context."""
+    stats = corpus_stats(db, top=25)
+    lines = [f"# Evidence pack: {topic}", ""]
+    lines.append(
+        f"Corpus: {stats['total']} comics. {stats['with_transcript']} have a "
+        f"transcript (all of #1..#1677); the other {stats['without_transcript']} "
+        f"are title and alt text only."
+    )
+    overlap = stats["topic_counts"].get(topic)
+    if overlap is not None:
+        lines.append(f"Comics matching this topic by any synonym: {overlap}")
+    lines.append("")
+
+    if not rows:
+        lines.append(f"No comics matched {topic!r}. Try a broader word.")
+        lines.append("")
+    else:
+        lines.append(f"## Exemplars ({len(rows)})")
+        lines.append("")
+        for row in rows:
+            lines.append(f"### #{row['num']} {row['title']} ({row['date']})")
+            lines.append(f"Title: {row['title']}")
+            lines.append(f"Alt: {row['alt']}")
+            transcript = (row["transcript"] or "").strip()
+            if transcript:
+                if len(transcript) > EXCERPT_CHARS:
+                    transcript = transcript[:EXCERPT_CHARS] + "\n[...truncated]"
+                lines.append("Transcript:")
+                lines.append(transcript)
+            else:
+                lines.append("Transcript: none (title and alt only)")
+            lines.append("")
+
+    lines.append("## Speakers in the corpus")
+    lines.append(", ".join(name for name, _ in stats["top_speakers"]))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def cmd_pack(args):
+    db = connect()
+    init_db(db)
+    rows = retrieve(db, args.topic, n=args.n)
+    print(format_pack(db, args.topic, rows))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="xkcd.py", description="xkcd corpus tool and writer support."

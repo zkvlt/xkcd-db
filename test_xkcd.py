@@ -488,6 +488,61 @@ def test_corpus_stats_reports_title_and_alt_lengths():
     assert s["alt_len"]["min"] == len("a tree")
 
 
+def romance_db():
+    """seeded_db plus a comic whose text says 'boyfriend' but never 'romance'."""
+    db = seeded_db()
+    xkcd.upsert_comic(db, dict(PAYLOAD_1, num=600, title="Android Boyfriend",
+                               alt="Happy Valentine's Day!",
+                               img="https://imgs.xkcd.com/comics/android_boyfriend.png"))
+    xkcd.rebuild_fts(db)
+    return db
+
+
+def test_retrieve_matches_a_synonym_not_just_the_literal_word():
+    """pack 'romance' must find a comic whose text says 'boyfriend', not 'romance'."""
+    numbers = [r["num"] for r in xkcd.retrieve(romance_db(), "romance")]
+    assert 600 in numbers
+
+
+def test_retrieve_returns_relevant_comics_before_irrelevant_ones():
+    db = seeded_db()
+    numbers = [r["num"] for r in xkcd.retrieve(db, "programming")]
+    assert numbers[0] == 3
+
+
+def test_retrieve_returns_empty_for_an_unsatisfiable_topic():
+    db = seeded_db()
+    assert xkcd.retrieve(db, "ferrofluid ziggurat") == []
+
+
+def test_retrieve_never_raises_on_hostile_topics():
+    """Review Focus 2, end to end through the real query path."""
+    db = seeded_db()
+    for hostile in ["gardening AND", 'a "quote', "NEAR(", "a - b", "OR OR",
+                    "garden)(", "NOT x", "*", "", "   "]:
+        xkcd.retrieve(db, hostile)
+
+
+def test_format_pack_includes_the_script_ready_fields():
+    db = seeded_db()
+    text = xkcd.format_pack(db, "barrel", xkcd.retrieve(db, "barrel"))
+    assert "Title: Barrel - Part 1" in text
+    assert "Alt: Don't we all." in text
+    assert "[[A boy sits in a barrel" in text
+
+
+def test_format_pack_says_so_when_nothing_matches():
+    db = seeded_db()
+    text = xkcd.format_pack(db, "ferrofluid ziggurat", [])
+    assert "No comics matched" in text
+
+
+def test_format_pack_reports_the_speaker_roster():
+    db = seeded_db()
+    text = xkcd.format_pack(db, "barrel", xkcd.retrieve(db, "barrel"))
+    assert "Boy" in text
+
+
 def _run():
     tests = [
         (n, f)
