@@ -185,14 +185,18 @@ real data.
   The most common speakers are `Man`, `Woman`, `Person 1`, `Person`, `Girl`,
   `Person 2`, `Narrator`, and `Figure`, which are positional labels rather than
   characters. Speaker extraction stays generic and no fixed roster is assumed.
-- **187 of 1665 transcripts contain no `[[...]]` block at all.** Scene-block
-  count is therefore null-safe and frequently zero, and it is reported as scene
-  blocks rather than panels. Median across the corpus is 1, maximum is 87.
+- A scene block counts only when it stands alone on its line. An inline `[[...]]`
+  is a stage direction. **187 of 1665 transcripts contain no `[[...]]` at all, and
+  207 contain no line-standing scene block**, so zero is a common and valid
+  result. Standing counts run min 0, median 1, p90 5, max 86. The field is named
+  `scene_blocks` rather than `panels` because a max of 86 is a count of scene
+  descriptions and is not a count of panels.
 
 Comic `#1` is the canonical fixture: two scene blocks, `Boy` as the only speaker,
-and an alt text of `Don't we all.` Comic `#300` is the stage-direction fixture:
-one scene block, even though its dialogue line reads
-`Girl: [[arms in the air]] Ohmygod, mine too!`
+and an alt text of `Don't we all.` Comic `#300` is the stage-direction fixture: it
+yields zero scene blocks, because its only `[[...]]` is the inline
+`Girl: [[arms in the air]] Ohmygod, mine too!` Comic `#487` has six standing
+blocks and a bare `Title text:` line that must not become a speaker.
 
 ### Data flow
 
@@ -254,13 +258,17 @@ Title: <title>
 Alt: <alt text>
 
 [[panel 1 scene description]]
-Cueball: <line>
+Man: <line>
 [[panel 2 scene description]]
+Woman: <line>
 ```
 
 Scene descriptions in double brackets and dialogue as `Speaker: line` match
 xkcd's own transcript convention, which means published scripts can be compared
-against the corpus directly.
+against the corpus directly. Speaker names are generic, following the corpus:
+the most frequent speakers are `Man`, `Woman`, `Person 1`, `Person`, `Girl`,
+`Narrator`, and `Figure`. Scripts should not invent named characters, because
+the corpus does not name them.
 
 ## Error handling
 
@@ -284,18 +292,30 @@ against the corpus directly.
 - `#404` does not exist. Skipping it is required, not defensive.
 - The transcript is absent from `#1678` onward, and from eleven comics between
   `#1609` and `#1677`. Half the corpus is title-and-alt only.
-- 187 transcripts contain no `[[...]]` block, so zero scene blocks is a valid
-  result rather than a parse failure.
+- 207 transcripts contain no line-standing scene block, 187 of them because they
+  contain no `[[...]]` at all. Zero is a valid result, not a parse failure.
 - `{{...}}` metadata blocks sit inside the transcript and look like dialogue to a
-  naive `Name:` regex. They must be stripped first.
+  naive `Name:` regex. Stripping them is necessary but not sufficient: `#487`
+  opens with a bare `Title text:` outside any braces, so a label blocklist runs
+  after stripping.
 - Some comics carry an undocumented `extra_parts` key, seen on `#2198`. Unknown
   keys are ignored rather than treated as errors.
-- Interactive comics (`1608`, `1416`, `1110`, `1525`, and similar) ship
-  JavaScript or animation rather than a static panel. They are flagged
-  `is_interactive` and excluded from scene-block statistics.
-- Images are a mix of `.png` and `.jpg`, with some `.gif`.
-- Image filenames contain parentheses and unicode, so URLs need encoding rather
-  than string concatenation.
+- `#1608` (Hoverboard) and `#1663` (Garden) have no static image at all. Their
+  `img` is `https://imgs.xkcd.com/comics/`, a bare directory URL that returns
+  403. They are marked `is_interactive` and their `img_path` stays null rather
+  than being treated as a download failure. Note that `#1663` is titled `Garden`,
+  which makes it a good negative case for topic retrieval.
+- Five comics ship an animated `.gif`: `#961`, `#1116`, `#1264`, `#2293`,
+  `#2445`. They download normally and are also marked `is_interactive`.
+- `#1110`, `#1416`, and `#1525` have static `.png` files but are JavaScript
+  driven, so image inspection cannot detect them. They are listed explicitly in
+  an `INTERACTIVE_NUMBERS` set.
+- Measured image extensions across 3301 comics: `png` 3166, `jpg` 128, `gif` 5,
+  and 2 with no filename.
+- Five image filenames contain characters that need percent encoding:
+  `barrel_cropped_(1).jpg`, `tree_cropped_(1).jpg`, `landscape_cropped_(1).jpg`,
+  `girl_sleeping_noline_(1).jpg`, and `#859`, whose filename is literally
+  `(.png`. Filenames are percent-encoded rather than concatenated.
 - `#3302` is the current latest. The number grows over time, which is why
   `fetch` probes for it instead of hardcoding.
 
@@ -309,11 +329,12 @@ and URL encoding of awkward filenames.
 
 There is also `xkcd.py selftest`, which asserts against known-good data in the
 live database: that comic `#1` parses to two scene blocks, the alt text
-`Don't we all.`, and `Boy` as its only speaker; that comic `#300` parses to one
-scene block and not two, because its second `[[...]]` is an inline stage
-direction; that a transcript with no scene blocks yields zero rather than null
-(187 of them do); and that a comic with no transcript yields null rather than
-zero for every derived text field.
+`Don't we all.`, and `Boy` as its only speaker; that comic `#300` parses to zero
+scene blocks rather than one, because its only `[[...]]` is an inline stage
+direction; that `Title text` never appears among the speakers of any comic, with
+`#487` as the specific case; that a transcript with no scene blocks yields zero
+rather than null (207 of them do); and that a comic with no transcript yields
+null rather than zero for every derived text field.
 
 ## Verification
 
@@ -326,7 +347,7 @@ Claims in this project are checked against real output, not asserted.
 | Analysis is real | Exactly 1665 rows have `has_transcript` true, and every one has a non-null `scene_blocks` value |
 | Nulls are honest | Every one of the 1636 transcript-less rows has null, not zero, for all five derived text fields |
 | Parsing is correct | Comic `#1` yields two scene blocks, the alt text `Don't we all.`, and `Boy` as its only speaker |
-| Stage directions are not panels | Comic `#300` yields one scene block, not two |
+| Stage directions are not panels | Comic `#300` yields zero scene blocks despite containing one `[[...]]` |
 | Metadata stripping works | `Title text` never appears in the `speakers` array of any row |
 | Retrieval is relevant | `pack "gardening"` and `pack "databases"` return comics a human agrees fit |
 | Retrieval is crash-proof | `pack` on a topic full of FTS5 metacharacters returns a result or a clean message, never a traceback |
