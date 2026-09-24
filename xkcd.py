@@ -798,10 +798,26 @@ def corpus_stats(db, top=15):
         )
     ]
 
-    speaker_counts = collections.Counter()
-    for row in db.execute("SELECT speakers FROM comics WHERE speakers IS NOT NULL"):
-        for name in json.loads(row[0]):
-            speaker_counts[name] += 1
+    # Split by source, never pooled: the two use different naming conventions,
+    # so adding Man and Megan together would describe neither.
+    speakers_by_source = {
+        "official": collections.Counter(),
+        "explainxkcd": collections.Counter(),
+    }
+    for row in db.execute(
+        "SELECT speakers, transcript_source FROM comics WHERE speakers IS NOT NULL"
+    ):
+        bucket = speakers_by_source.get(row["transcript_source"])
+        if bucket is None:
+            continue
+        for name in json.loads(row["speakers"]):
+            bucket[name] += 1
+
+    transcript_sources = {"official": 0, "explainxkcd": 0, "none": 0}
+    for row in db.execute(
+        "SELECT COALESCE(transcript_source, 'none') s, COUNT(*) c FROM comics GROUP BY s"
+    ):
+        transcript_sources[row["s"]] = row["c"]
 
     topic_counts = {}
     for topic in SYNONYMS:
@@ -822,7 +838,14 @@ def corpus_stats(db, top=15):
         "scene_blocks_over": len(scene_values),
         "scene_blocks": _percentiles(scene_values),
         "scene_blocks_median": _percentiles(scene_values)["median"],
-        "top_speakers": speaker_counts.most_common(top),
+        "speakers_by_source": {
+            source: counter.most_common(top)
+            for source, counter in speakers_by_source.items()
+        },
+        "transcript_sources": transcript_sources,
+        "incomplete_count": db.execute(
+            "SELECT COUNT(*) c FROM comics WHERE explain_incomplete = 1"
+        ).fetchone()["c"],
         "topic_counts": topic_counts,
         "date_first": min(dates) if dates else None,
         "date_last": max(dates) if dates else None,
@@ -867,9 +890,20 @@ def format_stats(s):
         lines.append(
             f"  {key:<6}              {_fmt(s['title_len'][key]):>4} / {_fmt(s['alt_len'][key])}"
         )
-    lines += ["", f"top speakers (of {s['with_transcript']} transcripts)"]
-    for name, count in s["top_speakers"]:
-        lines.append(f"  {count:>5}  {name}")
+    lines += ["", "transcript sources"]
+    for source in ("official", "explainxkcd", "none"):
+        lines.append(f"  {source:<12}         {s['transcript_sources'][source]}")
+    if s["incomplete_count"]:
+        lines.append(f"  flagged incomplete   {s['incomplete_count']}")
+    # Printed separately and never summed: the two sources name characters
+    # differently, so a combined list would describe neither convention.
+    for source in ("official", "explainxkcd"):
+        entries = s["speakers_by_source"][source]
+        if not entries:
+            continue
+        lines += ["", f"top speakers ({source})"]
+        for name, count in entries:
+            lines.append(f"  {count:>5}  {name}")
     lines += ["", "topics"]
     for topic, count in sorted(s["topic_counts"].items(), key=lambda kv: -kv[1]):
         lines.append(f"  {count:>5}  {topic}")
@@ -939,9 +973,15 @@ def format_pack(db, topic, rows):
                 lines.append("Transcript: none (title and alt only)")
             lines.append("")
 
-    lines.append("## Speakers in the corpus")
-    lines.append(", ".join(name for name, _ in stats["top_speakers"]))
-    lines.append("")
+    # Split by source for the same reason stats is: the two conventions name
+    # characters differently. Source labels on each exemplar come next.
+    for source in ("official", "explainxkcd"):
+        entries = stats["speakers_by_source"][source]
+        if not entries:
+            continue
+        lines.append(f"## Speakers in {source} transcripts")
+        lines.append(", ".join(name for name, _ in entries))
+        lines.append("")
     return "\n".join(lines)
 
 

@@ -541,9 +541,39 @@ def test_corpus_stats_scopes_transcript_metrics():
     assert s["non_transcript_rows"] == 2
 
 
-def test_corpus_stats_top_speakers_ignores_transcript_less_rows():
+def test_corpus_stats_counts_each_transcript_source():
     s = xkcd.corpus_stats(seeded_db())
-    assert s["top_speakers"][0] == ("Boy", 1)
+    assert s["transcript_sources"]["official"] == 1
+    assert s["transcript_sources"]["explainxkcd"] == 0
+    assert s["transcript_sources"]["none"] == 2
+
+
+def test_corpus_stats_never_pools_speakers_across_sources():
+    """The spec's rule: Man (official) and Megan (explainxkcd) are different
+    conventions and must not be added together."""
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", False)
+    xkcd.run_analyze(db)
+    s = xkcd.corpus_stats(db)
+    assert s["speakers_by_source"]["official"][0] == ("Boy", 1)
+    assert ("Boy", 1) not in s["speakers_by_source"]["explainxkcd"]
+    assert "top_speakers" not in s
+
+
+def test_corpus_stats_reports_the_incomplete_count():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", True)
+    xkcd.run_analyze(db)
+    assert xkcd.corpus_stats(db)["incomplete_count"] == 1
+
+
+def test_format_stats_prints_the_sources_separately():
+    db = seeded_db()
+    xkcd.store_explain(db, 2, "[a scene]\nMan: hello", False)
+    xkcd.run_analyze(db)
+    text = xkcd.format_stats(xkcd.corpus_stats(db))
+    assert "official" in text
+    assert "explainxkcd" in text
 
 
 def test_corpus_stats_counts_topics_from_the_synonym_map():
