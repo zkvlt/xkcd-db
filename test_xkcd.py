@@ -548,6 +548,31 @@ def test_run_selftest_fails_cleanly_on_an_empty_corpus():
     assert xkcd.run_selftest(tmpdb()) == 1
 
 
+def test_format_stats_handles_an_empty_corpus():
+    """Critical: `stats` raised TypeError formatting a None percentile."""
+    text = xkcd.format_stats(xkcd.corpus_stats(tmpdb()))
+    assert "comics" in text
+    assert "0" in text
+
+
+def test_corpus_stats_percentiles_are_none_when_there_is_no_data():
+    s = xkcd.corpus_stats(tmpdb())
+    assert s["title_len"] == {"min": None, "median": None, "p90": None, "max": None}
+    assert s["scene_blocks"]["median"] is None
+
+
+def test_comic_numbers_limit_zero_means_nothing():
+    """Important: `--limit 0` was falsy, so it started a full corpus fetch."""
+    assert xkcd.comic_numbers(10, 0) == []
+    assert xkcd.comic_numbers(10, None) == list(range(1, 11))
+    assert xkcd.comic_numbers(10, 3) == [1, 2, 3]
+
+
+def test_comic_numbers_skips_404():
+    assert 404 not in xkcd.comic_numbers(405)
+    assert xkcd.comic_numbers(405, 405) == [n for n in range(1, 406) if n != 404]
+
+
 def _run():
     tests = [
         (n, f)

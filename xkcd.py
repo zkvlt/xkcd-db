@@ -392,6 +392,19 @@ def needs_image(row):
     return has_static_image(row["img_url"])
 
 
+def comic_numbers(latest_num, limit=None):
+    """Comic numbers 1..latest, excluding the nonexistent #404.
+
+    `limit` counts comics, and `limit=0` means none. A truthiness check on the
+    limit would turn `--limit 0` into a full corpus fetch, which is exactly what
+    it did before this function existed.
+    """
+    numbers = [n for n in range(1, latest_num + 1) if n != 404]
+    if limit is not None:
+        numbers = numbers[:limit]
+    return numbers
+
+
 def cmd_fetch(args):
     db = connect()
     init_db(db)
@@ -401,9 +414,7 @@ def cmd_fetch(args):
         print("error: could not read the latest comic number", file=sys.stderr)
         return 2
 
-    numbers = [n for n in range(1, latest["num"] + 1) if n != 404]
-    if args.limit:
-        numbers = numbers[: args.limit]
+    numbers = comic_numbers(latest["num"], args.limit)
 
     fetched = skipped = 0
     failures = []
@@ -599,31 +610,42 @@ def corpus_stats(db, top=15):
 def cmd_stats(args):
     db = connect()
     init_db(db)
-    s = corpus_stats(db, top=args.top)
-
-    print(f"comics                 {s['total']}")
-    print(f"date range             {s['date_first']} .. {s['date_last']}")
-    print()
-    print("transcript coverage (the rest have title and alt only)")
-    print(f"  with a transcript    {s['with_transcript']}")
-    print(f"  without              {s['without_transcript']}")
-    print()
-    print(f"scene blocks (over the {s['scene_blocks_over']} transcripts)")
-    for key in ("min", "median", "p90", "max"):
-        print(f"  {key:<6}              {s['scene_blocks'][key]}")
-    print()
-    print("title / alt length")
-    for key in ("min", "median", "p90", "max"):
-        print(f"  {key:<6}              {s['title_len'][key]:>4} / {s['alt_len'][key]}")
-    print()
-    print(f"top speakers (of {s['with_transcript']} transcripts)")
-    for name, count in s["top_speakers"]:
-        print(f"  {count:>5}  {name}")
-    print()
-    print("topics")
-    for topic, count in sorted(s["topic_counts"].items(), key=lambda kv: -kv[1]):
-        print(f"  {count:>5}  {topic}")
+    print(format_stats(corpus_stats(db, top=args.top)))
     return 0
+
+
+def _fmt(value):
+    """A percentile renders as '-' when there is no data to compute it from."""
+    return "-" if value is None else value
+
+
+def format_stats(s):
+    """Render corpus statistics as text. Safe on an empty corpus, where every
+    percentile is None."""
+    lines = [
+        f"comics                 {s['total']}",
+        f"date range             {s['date_first'] or '-'} .. {s['date_last'] or '-'}",
+        "",
+        "transcript coverage (the rest have title and alt only)",
+        f"  with a transcript    {s['with_transcript']}",
+        f"  without              {s['without_transcript']}",
+        "",
+        f"scene blocks (over the {s['scene_blocks_over']} transcripts)",
+    ]
+    for key in ("min", "median", "p90", "max"):
+        lines.append(f"  {key:<6}              {_fmt(s['scene_blocks'][key])}")
+    lines += ["", "title / alt length"]
+    for key in ("min", "median", "p90", "max"):
+        lines.append(
+            f"  {key:<6}              {_fmt(s['title_len'][key]):>4} / {_fmt(s['alt_len'][key])}"
+        )
+    lines += ["", f"top speakers (of {s['with_transcript']} transcripts)"]
+    for name, count in s["top_speakers"]:
+        lines.append(f"  {count:>5}  {name}")
+    lines += ["", "topics"]
+    for topic, count in sorted(s["topic_counts"].items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {count:>5}  {topic}")
+    return "\n".join(lines)
 
 
 EXCERPT_CHARS = 900
