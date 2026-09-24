@@ -144,14 +144,24 @@ Derived columns, written by `analyze`, all nullable:
 
 | column | notes |
 | --- | --- |
-| `scene_blocks` | count of `[[...]]` scene blocks, null when there is no transcript |
+| `scene_blocks` | count of line-standing `[[...]]` blocks, null when there is no transcript |
 | `dialogue_lines` | count of `Speaker: line` occurrences, null when there is no transcript |
-| `characters` | JSON array of names found inside `[[...]]`, null when there is no transcript |
 | `speakers` | JSON array of names followed by a colon, null when there is no transcript |
-| `topics` | JSON array of taxonomy tags, computed for every comic |
 | `has_transcript` | boolean |
 | `is_interactive` | boolean |
 | `title_len`, `alt_len` | character counts, computed for every comic |
+
+Two fields that earlier drafts carried are deliberately absent.
+
+`characters` is gone. It was defined as names found inside `[[...]]` blocks, but
+scene blocks are prose descriptions (`A boy sits in a barrel which is floating in
+an ocean.`), and the corpus does not reliably name characters there. The names it
+does use arrive through the speaker channel instead, where `Black hat guy` and
+`Hat Guy` are already measured. A second field fed by a noisier source adds
+nothing.
+
+`topics` is gone as a stored column. Classification happens at query time:
+see the retrieval section below for the measurements that ruled storing it out.
 
 `comics_fts` is an FTS5 table over `title`, `alt`, and `transcript`, using
 `tokenize='porter unicode61'` so "running" matches "run". `num` is stored
@@ -210,29 +220,51 @@ command is safe to interrupt and rerun.
 Pure functions, no I/O beyond the database, so it is cheap to rerun.
 
 **`stats`** prints aggregates: date range, scene-block distribution, top
-speakers, topic counts, transcript coverage, title and alt length percentiles,
-and the most frequent content words after stopword removal. Any figure that
-depends on transcript text is labelled with the 1665-comic coverage it is drawn
-from.
+speakers, topic counts from the synonym map, transcript coverage, title and alt
+length percentiles, and the most frequent content words after stopword removal.
+Any figure that depends on transcript text is labelled with the 1665-comic
+coverage it is drawn from.
 
-**`pack <topic>`** takes the union of two retrievals: exact taxonomy tag matches,
-and FTS5 BM25 hits over title, alt, and transcript. It returns the top eight
-exemplars with their transcripts, plus the corpus-wide speaker roster and the
-topic's corpus stats.
+**`pack <topic>`** expands the topic through the synonym map, escapes it into a
+valid FTS5 query, and returns the top eight BM25 hits with their transcripts,
+plus the corpus-wide speaker roster and the topic's own corpus statistics. It
+reports a clean message when nothing matches rather than an empty pack.
 
-### Topic taxonomy
+### Retrieval
 
-A hand-written dict in `xkcd.py` maps a tag to keyword rules. Initial tag set:
+One mechanism, not two: an FTS5 query built from the topic plus a hand-written
+synonym map. `SYNONYMS` maps a broad human subject to the words the corpus
+actually uses, so `pack "romance"` expands to `romance`, `girlfriend`,
+`boyfriend`, `dating`, `marriage`, and `wedding`, then runs one disjunctive query.
+Measured against a live index, `pack "gardening"` returns `#2793 Garden Path
+Sentence` and `#2695 Soil`; `pack "romance"` returns `#280 Librarians`,
+`#600 Android Boyfriend`, and `#1431 Marriage`.
 
-`math`, `physics`, `space`, `biology`, `chemistry`, `programming`, `computers`,
-`ai`, `statistics`, `engineering`, `linguistics`, `philosophy`, `economics`,
-`romance`, `sex`, `existential`, `time-travel`, `internet`, `social-media`,
-`meta`, `history`, `maps`, `food`, `health`, `cats`, `parenting`, `work`,
-`politics`, `climate`, `weather`.
+Two approaches were measured and rejected first.
 
-Keyword rules alone would miss comics that never name their subject, and BM25
-alone would miss topic affinity. Running both and taking the union covers the
-gap without embeddings. Extending the taxonomy means editing one dict.
+Storing a classification per row was rejected. A first attempt tagged each comic
+by keyword-matching its title, alt text, and transcript. It produced visible
+noise: `#26 Fourier` picked up `cats` from its alt text, and `#24` picked up ten
+topics at once from a single long transcript. Storing those tags would have
+persisted the noise and gone stale whenever the keyword list changed.
+
+Hand-written suffix regexes (`cat(?:s|es)?`) were rejected because FTS5 already
+ships a porter stemmer. `cat` matches `cats` and `girlfriend` matches
+`girlfriends` with no suffix machinery.
+
+The first synonym list covers: `math`, `physics`, `space`, `biology`,
+`chemistry`, `programming`, `computers`, `ai`, `statistics`, `engineering`,
+`linguistics`, `philosophy`, `economics`, `romance`, `sex`, `existential`,
+`time-travel`, `internet`, `social-media`, `meta`, `history`, `maps`, `food`,
+`health`, `cats`, `parenting`, `work`, `politics`, `climate`, and `weather`.
+Because nothing is stored, extending it needs no re-analysis.
+
+**FTS5 query escaping is mandatory, not defensive.** Measured against a live
+index, `gardening AND`, `a "quote`, `NEAR(`, `a - b`, `OR OR`, `garden)(`,
+`NOT x`, and an empty string each raise `sqlite3.OperationalError` when handed to
+`MATCH` directly. Every topic is therefore tokenised to `\w+`, each word quoted,
+words inside one synonym joined by implicit AND, and synonyms joined by OR. Under
+that rule all eight queries return results without raising.
 
 ## Interfaces
 
@@ -323,9 +355,10 @@ the corpus does not name them.
 
 `test_xkcd.py` holds assert-based tests over the pure functions, using fixture
 strings copied from real comics. No network access in tests. Covered: transcript
-parsing, scene-block counting, `{{...}}` and `((...))` stripping, speaker and
-character extraction, taxonomy tagging, the pack formatter, FTS query escaping,
-and URL encoding of awkward filenames.
+parsing, scene-block counting, `{{...}}` and `((...))` stripping, speaker
+extraction and metadata-label rejection, synonym expansion, FTS query escaping
+against metacharacter inputs, image URL encoding, the interactive rules, the
+retry loop, and the pack formatter.
 
 There is also `xkcd.py selftest`, which asserts against known-good data in the
 live database: that comic `#1` parses to two scene blocks, the alt text
