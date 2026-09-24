@@ -97,6 +97,18 @@ META_LABELS = re.compile(
     re.I,
 )
 
+# The literal metadata labels measured in the corpus. A bare `Title text:` line
+# outside braces is what these look like, so none may ever become a speaker.
+# Distinct from META_LABELS, which is a prefix filter used to reject them at
+# parse time: `Map Title Text` starts with `Map` and is a panel label drawn on a
+# map, which is content, so a substring test would wrongly reject it.
+META_LABEL_NAMES = frozenset({
+    "title", "title text", "title-text", "panel title", "alt", "alt text",
+    "alt-text", "subtitle", "subheading", "headline", "legend", "citation",
+    "footnote", "mouseover", "mouseover text", "rollover text",
+    "author's comment", "options",
+})
+
 
 def strip_metadata(transcript):
     """Remove {{...}} and ((...)) blocks, which are metadata rather than dialogue."""
@@ -732,10 +744,12 @@ def run_selftest(db):
     ).fetchone()["c"]
     check("no transcript-less row carries derived text", nulls, 0)
 
-    leaking = db.execute(
-        "SELECT num FROM comics WHERE speakers LIKE '%Title text%'"
-    ).fetchall()
-    check("no metadata label leaked into speakers", [r[0] for r in leaking], [])
+    leaked = []
+    for row in db.execute("SELECT num, speakers FROM comics WHERE speakers IS NOT NULL"):
+        for name in json.loads(row["speakers"]):
+            if name.strip().lower() in META_LABEL_NAMES:
+                leaked.append((row["num"], name))
+    check("no metadata label leaked into speakers", leaked, [])
 
     zombies = db.execute(
         "SELECT num FROM comics WHERE has_transcript = 1 AND scene_blocks IS NULL"
