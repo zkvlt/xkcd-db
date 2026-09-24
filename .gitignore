@@ -1,0 +1,8 @@
+# Corpus build artifacts. Reproducible with `python3 xkcd.py fetch`.
+data/
+
+# Harness and editor scaffolding.
+.pi/
+.DS_Store
+__pycache__/
+*.pyc
