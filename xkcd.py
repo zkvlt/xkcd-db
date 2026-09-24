@@ -56,7 +56,11 @@ CREATE TABLE IF NOT EXISTS comics (
     has_transcript  INTEGER,
     is_interactive  INTEGER,
     title_len       INTEGER,
-    alt_len         INTEGER
+    alt_len         INTEGER,
+    explain_transcript  TEXT,
+    explain_fetched_at  TEXT,
+    explain_incomplete  INTEGER,
+    transcript_source   TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS comics_fts USING fts5(
@@ -78,9 +82,34 @@ def connect(path=DB_PATH):
     return db
 
 
+# Columns added after the table was first created. CREATE TABLE IF NOT EXISTS
+# will not add them to an existing database, and there is a live 3301-row corpus
+# that must upgrade in place rather than be re-fetched for 61 minutes.
+MIGRATIONS = {
+    "explain_transcript": "TEXT",
+    "explain_fetched_at": "TEXT",
+    "explain_incomplete": "INTEGER",
+    "transcript_source": "TEXT",
+}
+
+
+def migrate(db):
+    """Add any columns the existing table is missing. Idempotent.
+
+    The column names come from MIGRATIONS, whose keys are literal identifiers in
+    this file, so no outside value reaches the SQL.
+    """
+    have = {row[1] for row in db.execute("PRAGMA table_info(comics)")}
+    for column, kind in MIGRATIONS.items():
+        if column not in have:
+            db.execute(f"ALTER TABLE comics ADD COLUMN {column} {kind}")
+    db.commit()
+
+
 def init_db(db):
-    """Create the schema if it is not already present."""
+    """Create the schema if absent, then add any columns added since."""
     db.executescript(SCHEMA)
+    migrate(db)
     db.commit()
 
 

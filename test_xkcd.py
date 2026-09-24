@@ -573,6 +573,45 @@ def test_comic_numbers_skips_404():
     assert xkcd.comic_numbers(405, 405) == [n for n in range(1, 406) if n != 404]
 
 
+def columns(db, table="comics"):
+    return {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+
+
+def test_init_db_creates_the_new_explainxkcd_columns():
+    cols = columns(tmpdb())
+    for name in ("explain_transcript", "explain_fetched_at", "explain_incomplete",
+                 "transcript_source"):
+        assert name in cols, name
+
+
+def test_migrate_adds_columns_to_an_existing_table():
+    """Review Focus 1: CREATE TABLE IF NOT EXISTS does not add columns."""
+    db = tmpdb()
+    db.execute("ALTER TABLE comics DROP COLUMN explain_transcript")
+    db.commit()
+    assert "explain_transcript" not in columns(db)
+
+    xkcd.migrate(db)
+
+    assert "explain_transcript" in columns(db)
+
+
+def test_migrate_preserves_existing_rows():
+    """An already-built corpus upgrades in place; nothing is re-fetched."""
+    db = tmpdb()
+    xkcd.upsert_comic(db, PAYLOAD_1)
+    xkcd.migrate(db)
+    assert db.execute("SELECT COUNT(*) c FROM comics").fetchone()["c"] == 1
+    assert db.execute("SELECT title FROM comics").fetchone()["title"] == "Barrel - Part 1"
+
+
+def test_migrate_is_idempotent():
+    db = tmpdb()
+    xkcd.migrate(db)
+    xkcd.migrate(db)
+    assert "explain_transcript" in columns(db)
+
+
 def _run():
     tests = [
         (n, f)
