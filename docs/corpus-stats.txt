@@ -1,0 +1,78 @@
+comics                 3301
+date range             2006-01-01 .. 2026-09-23
+
+transcript coverage (the rest have title and alt only)
+  with a transcript    1665
+  without              1636
+
+scene blocks (over the 1665 transcripts)
+  min                 0
+  median              1
+  p90                 5
+  max                 86
+
+title / alt length
+  min                    1 / 0
+  median                13 / 115
+  p90                   22 / 209
+  max                   53 / 816
+
+top speakers (of 1665 transcripts)
+    231  Man
+    201  Woman
+     82  Person 1
+     71  Person
+     70  Person 2
+     64  Girl
+     57  Figure
+     55  Narrator
+     44  Guy
+     28  Caption
+     24  Boy
+     22  Voice
+     21  Man 1
+     21  Man 2
+     19  Hat Guy
+     19  Friend
+     15  Computer
+     15  Character
+     14  Student
+     12  Black hat guy
+     11  Phone
+     11  Beret guy
+     10  Hat guy
+     10  Figure 1
+     10  Teacher
+
+topics
+    381  computers
+    314  work
+    254  meta
+    252  space
+    177  internet
+    148  physics
+    144  statistics
+    131  romance
+    127  health
+    119  food
+    113  math
+    103  parenting
+    101  politics
+     96  social-media
+     92  maps
+     89  existential
+     88  sex
+     80  history
+     78  engineering
+     76  programming
+     72  linguistics
+     71  biology
+     55  ai
+     49  cats
+     46  time-travel
+     44  weather
+     42  chemistry
+     40  gardening
+     27  economics
+     20  climate
+     14  philosophy
