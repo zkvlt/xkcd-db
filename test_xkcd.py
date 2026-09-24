@@ -443,6 +443,51 @@ def test_run_analyze_is_idempotent():
     assert db.execute("SELECT COUNT(*) c FROM comics_fts").fetchone()["c"] == 1
 
 
+def seeded_db():
+    """Three comics: one with a transcript, two without."""
+    db = tmpdb()
+    xkcd.upsert_comic(db, PAYLOAD_1)
+    xkcd.upsert_comic(db, dict(PAYLOAD_1, num=2, title="Tree", transcript="",
+                               alt="a tree",
+                               img="https://imgs.xkcd.com/comics/tree_cropped_(1).jpg"))
+    xkcd.upsert_comic(db, dict(PAYLOAD_1, num=3, title="Python", transcript="",
+                               alt="I wrote 20 short programs in Python yesterday. It was wonderful.",
+                               img="https://imgs.xkcd.com/comics/python.png"))
+    xkcd.run_analyze(db)
+    return db
+
+
+def test_corpus_stats_counts_transcript_coverage():
+    s = xkcd.corpus_stats(seeded_db())
+    assert s["total"] == 3
+    assert s["with_transcript"] == 1
+    assert s["without_transcript"] == 2
+
+
+def test_corpus_stats_scopes_transcript_metrics():
+    """Transcript metrics must be labelled with their coverage, not corpus-wide."""
+    s = xkcd.corpus_stats(seeded_db())
+    assert s["scene_blocks_over"] == 1
+    assert s["scene_blocks_median"] == 2
+    assert s["non_transcript_rows"] == 2
+
+
+def test_corpus_stats_top_speakers_ignores_transcript_less_rows():
+    s = xkcd.corpus_stats(seeded_db())
+    assert s["top_speakers"][0] == ("Boy", 1)
+
+
+def test_corpus_stats_counts_topics_from_the_synonym_map():
+    s = xkcd.corpus_stats(seeded_db())
+    assert s["topic_counts"]["programming"] >= 1
+
+
+def test_corpus_stats_reports_title_and_alt_lengths():
+    s = xkcd.corpus_stats(seeded_db())
+    assert s["title_len"]["max"] == len("Barrel - Part 1")
+    assert s["alt_len"]["min"] == len("a tree")
+
+
 def _run():
     tests = [
         (n, f)

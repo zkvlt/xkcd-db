@@ -8,6 +8,7 @@ Subcommands: fetch, analyze, stats, pack, selftest.
 from __future__ import annotations
 
 import argparse
+import collections
 import io
 import json
 import re
@@ -517,6 +518,99 @@ def cmd_analyze(args):
     db = connect()
     init_db(db)
     run_analyze(db)
+    return 0
+
+
+def _percentiles(values):
+    if not values:
+        return {"min": None, "median": None, "p90": None, "max": None}
+    ordered = sorted(values)
+    return {
+        "min": ordered[0],
+        "median": ordered[len(ordered) // 2],
+        "p90": ordered[int(len(ordered) * 0.9)],
+        "max": ordered[-1],
+    }
+
+
+def corpus_stats(db, top=15):
+    """Aggregate figures. Transcript-derived metrics carry their own coverage so
+    nothing reads as a corpus-wide claim it cannot support."""
+    total = db.execute("SELECT COUNT(*) c FROM comics").fetchone()["c"]
+    with_transcript = db.execute(
+        "SELECT COUNT(*) c FROM comics WHERE has_transcript = 1"
+    ).fetchone()["c"]
+
+    scene_values = [
+        r[0] for r in db.execute(
+            "SELECT scene_blocks FROM comics WHERE scene_blocks IS NOT NULL"
+        )
+    ]
+
+    speaker_counts = collections.Counter()
+    for row in db.execute("SELECT speakers FROM comics WHERE speakers IS NOT NULL"):
+        for name in json.loads(row[0]):
+            speaker_counts[name] += 1
+
+    topic_counts = {}
+    for topic in SYNONYMS:
+        query = fts_query(topic)
+        if not query:
+            continue
+        topic_counts[topic] = db.execute(
+            "SELECT COUNT(*) c FROM comics_fts WHERE comics_fts MATCH ?", (query,)
+        ).fetchone()["c"]
+
+    dates = [r[0] for r in db.execute("SELECT date FROM comics WHERE date != ''")]
+
+    return {
+        "total": total,
+        "with_transcript": with_transcript,
+        "without_transcript": total - with_transcript,
+        "non_transcript_rows": total - with_transcript,
+        "scene_blocks_over": len(scene_values),
+        "scene_blocks": _percentiles(scene_values),
+        "scene_blocks_median": _percentiles(scene_values)["median"],
+        "top_speakers": speaker_counts.most_common(top),
+        "topic_counts": topic_counts,
+        "date_first": min(dates) if dates else None,
+        "date_last": max(dates) if dates else None,
+        "title_len": _percentiles(
+            [r[0] for r in db.execute("SELECT title_len FROM comics WHERE title_len IS NOT NULL")]
+        ),
+        "alt_len": _percentiles(
+            [r[0] for r in db.execute("SELECT alt_len FROM comics WHERE alt_len IS NOT NULL")]
+        ),
+    }
+
+
+def cmd_stats(args):
+    db = connect()
+    init_db(db)
+    s = corpus_stats(db, top=args.top)
+
+    print(f"comics                 {s['total']}")
+    print(f"date range             {s['date_first']} .. {s['date_last']}")
+    print()
+    print("transcript coverage (the rest have title and alt only)")
+    print(f"  with a transcript    {s['with_transcript']}")
+    print(f"  without              {s['without_transcript']}")
+    print()
+    print(f"scene blocks (over the {s['scene_blocks_over']} transcripts)")
+    for key in ("min", "median", "p90", "max"):
+        print(f"  {key:<6}              {s['scene_blocks'][key]}")
+    print()
+    print("title / alt length")
+    for key in ("min", "median", "p90", "max"):
+        print(f"  {key:<6}              {s['title_len'][key]:>4} / {s['alt_len'][key]}")
+    print()
+    print(f"top speakers (of {s['with_transcript']} transcripts)")
+    for name, count in s["top_speakers"]:
+        print(f"  {count:>5}  {name}")
+    print()
+    print("topics")
+    for topic, count in sorted(s["topic_counts"].items(), key=lambda kv: -kv[1]):
+        print(f"  {count:>5}  {topic}")
     return 0
 
 
